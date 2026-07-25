@@ -19,10 +19,12 @@
     "migrate": "node --env-file=.env db/migrate.ts"
   },
   "devDependencies": {
+    "@types/blessed": "^0.1.27",
     "@types/node": "^26.1.1",
     "typescript": "^7.0.2"
   },
   "dependencies": {
+    "blessed": "^0.1.81",
     "mysql2": "^3.23.1",
     "ollama": "^0.6.3"
   }

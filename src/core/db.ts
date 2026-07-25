@@ -37,6 +37,7 @@ export abstract class Entity<T extends EntityData> {
   get updatedAt() { return new Date(this.data.updatedAt) }
   get createdAt() { return new Date(this.data.createdAt) }
 
+  abstract toString(): string;
   abstract onLoad(): Promise<void>;
 
   protected constructor(id: string) {

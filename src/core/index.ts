@@ -1,40 +1,41 @@
-import * as readline from 'node:readline';
-import { stdin as input, stdout as output } from 'node:process';
+import blessed from 'blessed';
 import { Manager } from './manager.ts';
-import type { Entity } from './db.ts';
 
 const manager = await Manager.load("main");
-let currentEntity: Entity<any> | undefined;
+await manager?.loadContentCreators();
 
-console.log(manager?.columnsString);
-console.log(manager?.rowString);
+const entities = manager ? [manager, ...manager.contentCreators].filter((e) => e !== undefined) : [];
 
-const rl = readline.createInterface({ input, output });
 
-console.log('Type something and press Enter (type "exit" to quit):');
 
-rl.on('line', (line: string) => {
-  const trimmed = line.trim().toLowerCase();
-
-  if (trimmed === 'exit') {
-    rl.close();
-    return;
-  }
-
-  const raw = trimmed.split(" ");
-  const command = raw[0];
-  const arg0 = raw[1];
-  const arg1 = raw[2];
-
-  switch (command) {
-    case "use":
-      break;
-  }
+const screen = blessed.screen({
+  smartCSR: true,
+  title: 'dumby',
 });
 
-rl.on('close', async () => {
+const list = blessed.list({
+  parent: screen,
+  label: ' dumby ',
+  width: '100%',
+  height: '100%',
+  keys: true,
+  vi: true,
+  mouse: true,
+  tags: true,
+  border: { type: "bg" },
+  style: {
+    selected: { bg: 'blue' },
+  },
+});
+
+list.setItems(entities.map((e) => e.toString()));
+
+list.focus();
+screen.render();
+
+screen.key(['q', 'C-c', 'escape'], async () => {
+  screen.destroy();
   console.log('===Shutting Down===');
   await manager?.shutdown();
-
   process.exit(0);
 });

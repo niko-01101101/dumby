@@ -10,6 +10,13 @@ interface ContentCreatorData {
   createdAt: string;
 }
 
+const stateColor = {
+  online: "{green-bg} {/green-bg}",
+  offline: "{black-bg} {/black-bg}",
+  turningOff: "{red-bg} {/red-bg}",
+  stuck: "{yellow-bg} {/yellow-bg}",
+}
+
 export class ContentCreator extends Entity<ContentCreatorData> {
   table = "contentCreators";
 
@@ -35,4 +42,6 @@ export class ContentCreator extends Entity<ContentCreatorData> {
     this.state = "offline";
     console.log(`ContentCreator(${this.id}) Offline`);
   }
+
+  toString() { return `${"CCreator".padEnd(12)} ${this.id.padEnd(8)} ${stateColor[this.state]} ${this.state.padEnd(8)}` }
 }

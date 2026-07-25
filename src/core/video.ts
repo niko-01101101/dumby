@@ -26,4 +26,6 @@ export class Video extends Entity<VideoData> {
   async onLoad() {
 
   }
+
+  toString() { return `${"Video".padEnd(12)} ${this.id.padEnd(8)} ${this.state.padEnd(8)}` };
 }

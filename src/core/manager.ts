@@ -10,6 +10,13 @@ interface ManagerData {
   createdAt: string;
 }
 
+const stateColor = {
+  online: "{green-bg} {/green-bg}",
+  offline: "{black-bg} {/black-bg}",
+  turningOff: "{red-bg} {/red-bg}",
+  stuck: "{yellow-bg} {/yellow-bg}",
+}
+
 export class Manager extends Entity<ManagerData> {
   table = "managers";
 
@@ -43,11 +50,5 @@ export class Manager extends Entity<ManagerData> {
     console.log(`Manager(${this.id}) Offline`);
   }
 
-  get columnsString() {
-    return `|   id   |   state   |   updatedAt   |   createdAt   |
-------------------------------------------------------`}
-
-  get rowString() {
-    return `|${this.id.padEnd(8)}|${this.state.padEnd(11)}|${this.updatedAt?.toLocaleDateString().padEnd(15)}|${this.createdAt?.toLocaleDateString().padEnd(15)}|`
-  }
+  toString() { return `${"Manager".padEnd(12)} ${this.id.padEnd(8)} ${stateColor[this.state]} ${this.state.padEnd(11)}` }
 }
