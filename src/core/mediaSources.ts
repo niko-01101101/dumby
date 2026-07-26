@@ -11,9 +11,17 @@ function requireEnv(name: string): string {
   return value;
 }
 
+// None of fetch()'s calls here had any timeout — a stalled connection (server
+// accepts but never finishes responding) hangs the awaiting command forever
+// with no error, which from the AI loop's perspective looks like it just
+// stopped mid-turn rather than failing. Search/API calls should be quick;
+// the actual clip download gets more room since it's transferring real bytes.
+const API_FETCH_TIMEOUT_MS = 20_000;
+const DOWNLOAD_TIMEOUT_MS = 2 * 60 * 1000;
+
 async function downloadToFile(url: string, destPath: string): Promise<void> {
   await mkdir(dirname(destPath), { recursive: true });
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
   if (!res.ok || !res.body) throw new Error(`Failed to download ${url}: ${res.status} ${res.statusText}`);
   await pipeline(Readable.fromWeb(res.body as any), createWriteStream(destPath));
 }
@@ -25,7 +33,7 @@ interface PexelsSearchResponse { videos: PexelsVideo[]; }
 export async function fetchPexelsClip(query: string, destPath: string): Promise<void> {
   const apiKey = requireEnv("PEXELS_API_KEY");
   const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=1`;
-  const res = await fetch(url, { headers: { Authorization: apiKey } });
+  const res = await fetch(url, { headers: { Authorization: apiKey }, signal: AbortSignal.timeout(API_FETCH_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`Pexels search failed: ${res.status} ${res.statusText}`);
 
   const data = await res.json() as PexelsSearchResponse;
@@ -43,7 +51,7 @@ interface PixabaySearchResponse { hits: PixabayHit[]; }
 export async function fetchPixabayClip(query: string, destPath: string): Promise<void> {
   const apiKey = requireEnv("PIXABAY_API_KEY");
   const url = `https://pixabay.com/api/videos/?key=${apiKey}&q=${encodeURIComponent(query)}&per_page=3`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(API_FETCH_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`Pixabay search failed: ${res.status} ${res.statusText}`);
 
   const data = await res.json() as PixabaySearchResponse;
@@ -55,6 +63,14 @@ export async function fetchPixabayClip(query: string, destPath: string): Promise
   await downloadToFile(file.url, destPath);
 }
 
+// Nothing bounds how long a model's reply can get (no token limit is set on
+// the Ollama chat calls in ContentCreator/Editor), and VOICEOVER hands that
+// reply straight to Piper as narration text. A stuck/repetitive model could
+// hand Piper an enormous script, which would otherwise just run — however
+// long that takes — with no feedback until it's done. This timeout turns an
+// unbounded synthesis into a clear, bounded failure instead.
+const PIPER_TIMEOUT_MS = 2 * 60 * 1000;
+
 export async function synthesizeVoiceover(text: string, destPath: string): Promise<void> {
   await mkdir(dirname(destPath), { recursive: true });
   const bin = process.env.PIPER_BIN ?? "piper";
@@ -63,10 +79,17 @@ export async function synthesizeVoiceover(text: string, destPath: string): Promi
   await new Promise<void>((resolve, reject) => {
     const proc = spawn(bin, ["--model", model, "--output_file", destPath]);
     let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGKILL");
+    }, PIPER_TIMEOUT_MS);
     proc.stderr.on("data", (chunk) => { stderr += chunk; });
-    proc.on("error", reject);
+    proc.on("error", (err) => { clearTimeout(timer); reject(err); });
     proc.on("close", (code) => {
-      if (code === 0) resolve();
+      clearTimeout(timer);
+      if (timedOut) reject(new Error(`piper timed out after ${PIPER_TIMEOUT_MS}ms (script too long?)`));
+      else if (code === 0) resolve();
       else reject(new Error(`piper exited with code ${code}: ${stderr}`));
     });
     proc.stdin.write(text);

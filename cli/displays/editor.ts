@@ -2,7 +2,7 @@ import { Editor } from "#core/editor";
 import { Video } from "#core/video";
 import { randomID } from "#core/db";
 import blessed from 'blessed';
-import { entityDisplay, startShutdownAction } from "./entityDisplay.ts";
+import { entityDisplay, refreshListItems, startShutdownAction } from "./entityDisplay.ts";
 import { videoDisplay } from "./video.ts";
 
 export function editorDisplay(editor: Editor, opts?: { back?: () => void }) {
@@ -30,6 +30,27 @@ export function editorDisplay(editor: Editor, opts?: { back?: () => void }) {
       })
 
       aiHistory.setLabel("Brain");
+      registerFocusable(aiHistory);
+
+      // blessed's mouse tracking is a terminal-wide mode, not per-widget —
+      // once any element enables it (videoList/actionList etc. all do), the
+      // terminal stops doing its own click-drag text selection anywhere on
+      // screen, mouse events go to blessed instead. There's no way to exempt
+      // just this box, so toggle terminal mouse tracking off/on for the
+      // whole screen while the Brain box is focused, so a normal
+      // drag-select-and-copy works when the user wants to copy from it.
+      let mouseCaptureOff = false;
+      aiHistory.key(['c'], () => {
+        mouseCaptureOff = !mouseCaptureOff;
+        if (mouseCaptureOff) {
+          display.screen.program.disableMouse();
+          aiHistory.setLabel("Brain (mouse off — drag to select/copy, 'c' to restore)");
+        } else {
+          display.screen.program.enableMouse();
+          aiHistory.setLabel("Brain");
+        }
+        display.screen.render();
+      });
 
       const videoList = blessed.list({
         parent: display,
@@ -57,8 +78,8 @@ export function editorDisplay(editor: Editor, opts?: { back?: () => void }) {
 
       return {
         onChange: () => {
-          videoList.setItems(editor.videos.map((v) => v?.toString() ?? ""));
-          aiHistory.setContent(editor.history.map((msg) => msg.content).join("\n"));
+          refreshListItems(videoList, editor.videos.map((v) => v?.toString() ?? ""));
+          aiHistory.setContent(editor.history.map((msg) => msg.role === "system" ? `{gray-fg}${msg.content}{/gray-fg}` : msg.content).join("\n"));
         },
       };
     },

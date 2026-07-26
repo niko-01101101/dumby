@@ -3,6 +3,7 @@ import { Manager } from '#core/manager';
 import { ContentCreator } from '#core/contentCreator';
 import { Editor } from '#core/editor';
 import { Video } from '#core/video';
+import { refreshListItems } from './displays/entityDisplay.ts';
 import { managerDisplay } from './displays/manager.ts';
 import { contentCreatorDisplay } from './displays/contentCreator.ts';
 import { editorDisplay } from './displays/editor.ts';
@@ -77,7 +78,7 @@ process.on('unhandledRejection', (reason) => {
 });
 
 entities.map((e) => e.on("change", () => {
-  list.setItems(entities.map((e) => e.toString()));
+  refreshListItems(list, entities.map((e) => e.toString()));
 }));
 
 let currentBack: () => void = showList;

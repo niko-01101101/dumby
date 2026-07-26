@@ -1,15 +1,27 @@
 import { spawn } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
+
+// Bounds how long a single compile can run — a malformed or absurdly long
+// input (e.g. a corrupt clip, or audio far longer than intended) should fail
+// clearly rather than run indefinitely with no feedback.
+const FFMPEG_TIMEOUT_MS = 5 * 60 * 1000;
 
 function runFfmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     const proc = spawn("ffmpeg", args);
     let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGKILL");
+    }, FFMPEG_TIMEOUT_MS);
     proc.stderr.on("data", (chunk) => { stderr += chunk; });
-    proc.on("error", reject);
+    proc.on("error", (err) => { clearTimeout(timer); reject(err); });
     proc.on("close", (code) => {
-      if (code === 0) resolve();
+      clearTimeout(timer);
+      if (timedOut) reject(new Error(`ffmpeg timed out after ${FFMPEG_TIMEOUT_MS}ms`));
+      else if (code === 0) resolve();
       else reject(new Error(`ffmpeg exited with code ${code}: ${stderr}`));
     });
   });
@@ -21,7 +33,12 @@ export async function compileVideo(clipPaths: string[], audioPath: string | unde
   await mkdir(dirname(outputPath), { recursive: true });
 
   const listPath = `${outputPath}.concat.txt`;
-  const listContents = clipPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n");
+  // The concat demuxer resolves relative entries against the list file's own
+  // directory, not the process cwd - since the list lives inside mediaDir()
+  // alongside clips whose stored localPath is *itself* already relative to
+  // mediaDir(), a relative entry here would get mediaDir() prepended twice
+  // (e.g. "media/media/<id>/<file>.mp4") and fail to open. Absolute paths sidestep that.
+  const listContents = clipPaths.map((p) => `file '${resolve(p).replace(/'/g, "'\\''")}'`).join("\n");
   await writeFile(listPath, listContents, "utf8");
 
   try {

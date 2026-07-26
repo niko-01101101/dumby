@@ -23,6 +23,12 @@ export class Manager extends Entity<ManagerData> {
   get state() { return this.data.state }
   async setState(s: ManagerState) { this.data.state = s; await this.set("state", s) }
 
+  get maxAllocatedCreators() { return this.data.maxAllocatedCreators }
+  async setMaxAllocatedCreators(a: number) { await this.set("maxAllocatedCreators", a) }
+
+  get maxAllocatedEditors() { return this.data.maxAllocatedEditors }
+  async setMaxAllocatedEditors(a: number) { await this.set("maxAllocatedEditors", a) }
+
   private _contentCreators: (ContentCreator | undefined)[] = [];
   get contentCreators() { return this._contentCreators }
   async loadContentCreators() {
@@ -69,10 +75,12 @@ export class Manager extends Entity<ManagerData> {
   toString() { return `${"Manager".padEnd(12)} ${this.id.padEnd(8)} ${stateColor[this.state]} ${this.state.padEnd(11)}` }
   toDetailString() {
     return `
-${"ID".padEnd(10)} ${this.id} 
-${"State".padEnd(10)} ${stateColor[this.state]} ${this.state.padEnd(11)}
-${"UpdatedAt".padEnd(10)} ${this.updatedAt.toLocaleString().padEnd(11)}
-${"CreatedAt".padEnd(10)} ${this.createdAt.toLocaleString().padEnd(11)}
+${"ID".padEnd(25)} ${this.id} 
+${"State".padEnd(25)} ${stateColor[this.state]} ${this.state.padEnd(11)}
+${"Max Allocated Creators".padEnd(25)} ${this.maxAllocatedCreators.toString().padEnd(11)}
+${"Max Allocated Editors".padEnd(25)} ${this.maxAllocatedEditors.toString().padEnd(11)}
+${"UpdatedAt".padEnd(25)} ${this.updatedAt.toLocaleString().padEnd(11)}
+${"CreatedAt".padEnd(25)} ${this.createdAt.toLocaleString().padEnd(11)}
 `
   }
 }

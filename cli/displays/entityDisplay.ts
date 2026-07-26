@@ -13,9 +13,16 @@ export interface StartShutdownEntity {
 }
 
 export function startShutdownAction(entity: StartShutdownEntity): EntityAction {
+  // start()/shutdown() are fired here without being awaited by the caller
+  // (a blessed list "select" handler can't usefully await anyway), so a
+  // rejection has nowhere to land unless caught here — otherwise a failure
+  // (e.g. start() setting state to "offline" and rethrowing) becomes an
+  // unhandled rejection that dumps a raw stack trace into the log box
+  // instead of a clean message, even though the entity already reflects the
+  // failure fine via its own state.
   return entity.state === "online"
-    ? { label: 'Shutdown', run: () => { entity.shutdown(); } }
-    : { label: 'Start', run: () => { entity.start(); } };
+    ? { label: 'Shutdown', run: () => { entity.shutdown().catch((e: unknown) => console.error(`Shutdown failed: ${e instanceof Error ? e.message : String(e)}`)); } }
+    : { label: 'Start', run: () => { entity.start().catch((e: unknown) => console.error(`Start failed: ${e instanceof Error ? e.message : String(e)}`)); } };
 }
 
 export interface EntityDisplayExtension {
@@ -26,7 +33,7 @@ export interface EntityDisplayCtx {
   display: Widgets.BoxElement;
   pause: () => void;
   show: () => void;
-  registerFocusable: (el: Widgets.ListElement) => void;
+  registerFocusable: (el: Widgets.BlessedElement) => void;
 }
 
 export interface EditableField<E extends DisplayableEntity> {
@@ -47,6 +54,19 @@ export interface EntityDisplayOptions<E extends DisplayableEntity> {
 export interface EntityAction {
   label: string;
   run: () => void;
+}
+
+// blessed's List.setItems() always calls select(0) internally, then tries to
+// re-find the previously selected item by exact text match. Since our items
+// are entity.toString()s that change on every "change" event, that match
+// often fails and blessed re-derives scroll position from the selected
+// index instead of preserving it - so a list a user has scrolled through
+// snaps back around every time anything notifies "change" elsewhere.
+// Save/restore childBase (blessed's scroll offset) around the call to stop it.
+export function refreshListItems(list: Widgets.ListElement, items: string[]) {
+  const childBase = list.childBase;
+  list.setItems(items);
+  list.childBase = Math.min(childBase, Math.max(0, items.length - 1));
 }
 
 export interface EntityDisplayHandle {
@@ -114,11 +134,17 @@ export function entityDisplay<E extends DisplayableEntity>(entity: E, options: E
 
   const focusables: Widgets.BlessedElement[] = [];
 
-  function addFocusable(el: Widgets.ListElement) {
+  function addFocusable(el: Widgets.BlessedElement) {
     focusables.push(el);
-    el.style.selected.bg = undefined;
-    el.on('focus', () => { el.style.selected.bg = 'blue'; screen.render(); });
-    el.on('blur', () => { el.style.selected.bg = undefined; screen.render(); });
+    // Only list-style elements have a "selected" row style to toggle on
+    // focus/blur — a Log (e.g. the Brain box) has no such concept, so this
+    // just no-ops for those and relies on the border for focus indication.
+    const style = el.style as { selected?: { bg?: unknown } };
+    if (style.selected) {
+      style.selected.bg = undefined;
+      el.on('focus', () => { style.selected!.bg = 'blue'; screen.render(); });
+      el.on('blur', () => { style.selected!.bg = undefined; screen.render(); });
+    }
   }
 
   addFocusable(actionList);
@@ -142,7 +168,7 @@ export function entityDisplay<E extends DisplayableEntity>(entity: E, options: E
     fieldsList.setLabel('Fields');
 
     refreshFields = () => {
-      fieldsList.setItems(fields.map((f) => `${f.label}: ${f.getValue(entity)}`));
+      refreshListItems(fieldsList, fields.map((f) => `${f.label}: ${f.getValue(entity)}`));
     };
     refreshFields();
     addFocusable(fieldsList);
@@ -198,7 +224,7 @@ export function entityDisplay<E extends DisplayableEntity>(entity: E, options: E
       data.setContent(options.detail(entity));
       refreshFields();
       actions = buildActions();
-      actionList.setItems(actions.map((a) => a.label));
+      refreshListItems(actionList, actions.map((a) => a.label));
       extension?.onChange?.();
       screen.render();
     });

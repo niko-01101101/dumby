@@ -1,6 +1,6 @@
 import { Manager } from "#core/manager";
 import blessed from 'blessed';
-import { entityDisplay, startShutdownAction } from "./entityDisplay.ts";
+import { entityDisplay, refreshListItems, startShutdownAction } from "./entityDisplay.ts";
 import { contentCreatorDisplay } from "./contentCreator.ts";
 import { ContentCreator } from "#core/contentCreator";
 import { randomID } from "#core/db";
@@ -37,7 +37,7 @@ export function managerDisplay(manager: Manager, opts?: { back?: () => void }) {
 
       return {
         onChange: () => {
-          ccList.setItems(manager.contentCreators.map((cc) => cc?.toString() ?? ""));
+          refreshListItems(ccList, manager.contentCreators.map((cc) => cc?.toString() ?? ""));
         },
       };
     },
