@@ -10,7 +10,7 @@ interface VideoData {
 }
 
 export class Video extends Entity<VideoData> {
-  table = "videos";
+  static table = "videos";
 
   private _contentCreator: any
   get contentCreator() { return this._contentCreator }

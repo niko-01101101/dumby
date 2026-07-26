@@ -8,6 +8,8 @@ function requireEnv(name: string): string {
   return value;
 }
 
+export function randomID(): string { return crypto.randomUUID(); }
+
 export function getPool(): Pool {
   pool ??= createPool({
     host: process.env.MYSQL_HOST ?? "127.0.0.1",
@@ -21,17 +23,35 @@ export function getPool(): Pool {
   return pool;
 }
 
+export let entityCache: Map<string, Entity<any>> = new Map();
+
 export interface EntityData {
   id: string;
   updatedAt: string;
   createdAt: string;
+  deletedAt: string;
 }
 export type NonstaticField<T extends EntityData> = Omit<T, "id" | "updatedAt" | "createdAt">;
+export type EntityEventType = "change";
 
 export abstract class Entity<T extends EntityData> {
-  abstract table: string;
+  protected get table(): string { return (this.constructor as typeof Entity).table; }
+  static table: string;
+
   protected pool: Pool;
   protected data: T = {} as T;
+
+  private _listeners: { evt: EntityEventType, fn: () => void }[] = [];
+  on(evt: EntityEventType, fn: () => void) {
+    const nl = { evt, fn };
+    this._listeners.push(nl);
+    fn();
+    return () => this._listeners = this._listeners.filter((l) => l !== nl);
+  }
+
+  protected onChange() {
+    this._listeners.filter((l) => l.evt === "change").forEach((l) => l.fn());
+  }
 
   get id() { return this.data.id }
   get updatedAt() { return new Date(this.data.updatedAt) }
@@ -46,14 +66,22 @@ export abstract class Entity<T extends EntityData> {
   }
 
   static async load<C extends typeof Entity<any>>(this: C, id?: string): Promise<C["prototype"] | undefined> {
+    if (!id) return undefined;
+    const cacheID = `${id}:${this.table}`;
+
+    const cached = entityCache.get(cacheID);
+    if (cached) return cached as C["prototype"];
+
     try {
-      if (!id) return undefined;
       const obj = new (this as any)(id) as C["prototype"];
+      entityCache.set(cacheID, obj);
+
       const exists = await obj.fetch();
       if (!exists) await obj.create();
-      obj.onLoad();
+      await obj.onLoad();
       return obj;
     } catch (e: any) {
+      entityCache.delete(cacheID);
       throw new Error("Failed to load Entity", { cause: e });
     }
   }
@@ -62,6 +90,7 @@ export abstract class Entity<T extends EntityData> {
     try {
       await this.pool.execute(`UPDATE ${this.table} SET ${String(column)} = ? WHERE id = ?`, [value, this.id]);
       this.data[column] = value;
+      this.onChange();
       return true;
     } catch (e: any) {
       throw new Error(`Failed to set column(${String(column)}) to ${value} on Entity(${this.table}, ${this.id})`, { cause: e });
@@ -81,7 +110,17 @@ export abstract class Entity<T extends EntityData> {
 
   async create(): Promise<boolean> {
     await this.pool.execute(`INSERT INTO ${this.table} (id) VALUES (?)`, [this.id]);
-    this.fetch();
+    await this.fetch();
     return true;
+  }
+
+  async delete(): Promise<boolean> {
+    try {
+      await this.pool.execute(`UPDATE ${this.table} SET deletedAt = NOW()`, [this.id]);
+      delete this;
+      return true;
+    } catch (e: any) {
+      throw new Error(`Failed to delete Entity(${this.table}, ${this.id})`, { cause: e });
+    }
   }
 }

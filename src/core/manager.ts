@@ -2,7 +2,8 @@ import type { RowDataPacket } from "mysql2";
 import { ContentCreator } from "./contentCreator.ts";
 import { Entity } from "./db.ts";
 
-export type ManagerState = "online" | "offline" | "turningOff" | "stuck";
+export type ManagerState = "online" | "starting" | "offline" | "shuttingDown" | "stuck";
+export const managerStates: ManagerState[] = ["online", "starting", "offline", "shuttingDown", "stuck"];
 interface ManagerData {
   id: string;
   state: ManagerState;
@@ -12,43 +13,68 @@ interface ManagerData {
 
 const stateColor = {
   online: "{green-bg} {/green-bg}",
+  starting: "{blue-bg} {/blue-bg}",
   offline: "{black-bg} {/black-bg}",
-  turningOff: "{red-bg} {/red-bg}",
+  shuttingDown: "{red-bg} {/red-bg}",
   stuck: "{yellow-bg} {/yellow-bg}",
 }
 
 export class Manager extends Entity<ManagerData> {
-  table = "managers";
+  static table = "managers";
 
   get state() { return this.data.state }
-  set state(s: ManagerState) { this.data.state = s; void this.set("state", s) }
+  async setState(s: ManagerState) { this.data.state = s; await this.set("state", s) }
 
   private _contentCreators: (ContentCreator | undefined)[] = [];
   get contentCreators() { return this._contentCreators }
   async loadContentCreators() {
-    const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT id FROM ${this.table} WHERE id = ?`, [this.id]);
+    const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT id FROM ${ContentCreator.table} WHERE managerID = ? AND deletedAt IS NULL`, [this.id]);
     this._contentCreators = await Promise.all(rows.map(async (cc) => await ContentCreator.load(cc.id)));
   }
 
-  async addContentCreator(cc: ContentCreator) { await cc.setManager(this); this.contentCreators?.push(cc) }
+  async addContentCreator(cc: ContentCreator) {
+    await cc.setManager(this);
+    this.contentCreators?.push(cc);
+    this.onChange();
+  }
 
-  async removeContentCreator(cc: ContentCreator) { await (this.contentCreators?.find((_cc) => _cc === cc))?.setManager(undefined) }
+  async removeContentCreator(cc: ContentCreator) {
+    await (this.contentCreators?.find((_cc) => _cc === cc))?.setManager(undefined);
+    this.onChange();
+  }
 
   async onLoad() {
-    this.state = "online";
-
+    this.start();
     await this.loadContentCreators();
   }
 
   async shutdown() {
-    console.log(`Manager(${this.id}) Turning Off...`);
-    this.state = "turningOff";
+    console.log(`Manager(${this.id}) Shutting Down...`);
+    await this.setState("shuttingDown");
 
     await Promise.all(this.contentCreators.map(async (cc) => { await cc?.shutdown(); }));
 
-    this.state = "offline";
+    await this.setState("offline");
     console.log(`Manager(${this.id}) Offline`);
   }
 
+  async start() {
+    console.log(`Manager(${this.id}) Starting...`);
+    await this.setState("starting");
+
+    await Promise.all(this.contentCreators.map(async (cc) => { await cc?.start(); }));
+
+    await this.setState("online");
+    console.log(`Manager(${this.id}) Online`);
+  }
+
   toString() { return `${"Manager".padEnd(12)} ${this.id.padEnd(8)} ${stateColor[this.state]} ${this.state.padEnd(11)}` }
+  toDetailString() {
+    return `
+${"ID".padEnd(10)} ${this.id} 
+${"State".padEnd(10)} ${stateColor[this.state]} ${this.state.padEnd(11)}
+${"UpdatedAt".padEnd(10)} ${this.updatedAt.toLocaleString().padEnd(11)}
+${"CreatedAt".padEnd(10)} ${this.createdAt.toLocaleString().padEnd(11)}
+`
+  }
 }
