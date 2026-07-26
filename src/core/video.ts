@@ -1,16 +1,13 @@
-import { Entity } from "./db.ts";
+import { Entity, type EntityData } from "./db.ts";
 
 export type VideoState = "notStarted" | "workingOn" | "finished";
-interface VideoData {
-  id: string;
+interface VideoData extends EntityData {
   contentCreatorID?: string;
   state: VideoState;
-  updatedAt: string;
-  createdAt: string;
 }
 
 export class Video extends Entity<VideoData> {
-  table = "videos";
+  static table = "videos";
 
   private _contentCreator: any
   get contentCreator() { return this._contentCreator }
