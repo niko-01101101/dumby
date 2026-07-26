@@ -126,5 +126,4 @@ export abstract class Entity<T extends EntityData> {
 }
 
 export class EntityList{
-
 }

@@ -2,6 +2,8 @@ import { Entity, type EntityData } from "./db.ts";
 import { Manager } from "./manager.ts";
 
 export type ContentCreatorState = "online" | "starting" | "offline" | "shuttingDown" | "stuck";
+export const contentCreatorStates: ContentCreatorState[] = ["online", "starting", "offline", "shuttingDown", "stuck"];
+
 interface ContentCreatorData extends EntityData {
   managerID?: string;
   state: ContentCreatorState;

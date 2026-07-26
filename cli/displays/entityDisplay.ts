@@ -19,11 +19,18 @@ export interface EntityDisplayCtx {
   registerFocusable: (el: Widgets.ListElement) => void;
 }
 
+export interface EditableField<E extends DisplayableEntity> {
+  label: string;
+  getValue: (entity: E) => string;
+  setValue: (entity: E, value: string) => Promise<void> | void;
+}
+
 export interface EntityDisplayOptions<E extends DisplayableEntity> {
   label: string;
   detail: (entity: E) => string;
   extend?: (ctx: EntityDisplayCtx) => EntityDisplayExtension | void;
   extraActions?: EntityAction[];
+  fields?: EditableField<E>[];
 }
 
 export interface EntityAction {
@@ -71,12 +78,14 @@ export function entityDisplay<E extends DisplayableEntity>(entity: E, options: E
     actions[index]?.run();
   });
 
+  const fields = options.fields ?? [];
+
   const data = blessed.box({
     parent: display,
     top: 0,
     right: 0,
     width: '33%',
-    height: '100%-1',
+    height: fields.length ? '50%' : '100%-1',
     tags: true,
     border: { type: 'line' },
   });
@@ -91,6 +100,57 @@ export function entityDisplay<E extends DisplayableEntity>(entity: E, options: E
   }
 
   addFocusable(actionList);
+
+  let refreshFields = () => { };
+
+  if (fields.length) {
+    const fieldsList = blessed.list({
+      parent: display,
+      bottom: 0,
+      right: 0,
+      width: '33%',
+      height: '50%-1',
+      keys: true,
+      vi: true,
+      mouse: true,
+      tags: true,
+      border: { type: 'line' },
+      style: { selected: { bg: 'blue' } },
+    });
+    fieldsList.setLabel('Fields');
+
+    refreshFields = () => {
+      fieldsList.setItems(fields.map((f) => `${f.label}: ${f.getValue(entity)}`));
+    };
+    refreshFields();
+    addFocusable(fieldsList);
+
+    fieldsList.on('select', (_item, index) => {
+      const field = fields[index];
+      if (!field) return;
+
+      const prompt = blessed.prompt({
+        parent: screen,
+        top: 'center',
+        left: 'center',
+        width: '50%',
+        height: 7,
+        tags: true,
+        border: { type: 'line' },
+      });
+      prompt.setLabel(field.label);
+
+      prompt.input(field.label, field.getValue(entity), (err, value) => {
+        prompt.destroy();
+        fieldsList.focus();
+        screen.render();
+        if (err || value === undefined) return;
+        Promise.resolve(field.setValue(entity, value)).catch((e: unknown) => {
+          console.error(`Failed to set ${field.label}: ${e instanceof Error ? e.message : String(e)}`);
+        });
+      });
+    });
+  }
 
   const extension = options.extend?.({
     display,
@@ -112,6 +172,7 @@ export function entityDisplay<E extends DisplayableEntity>(entity: E, options: E
 
   const stopListening = entity.on("change", () => {
     data.setContent(options.detail(entity));
+    refreshFields();
     actions = buildActions();
     actionList.setItems(actions.map((a) => a.label));
     extension?.onChange?.();

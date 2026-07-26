@@ -1,4 +1,4 @@
-import { Manager } from "#core/manager";
+import { Manager, managerStates } from "#core/manager";
 import blessed from 'blessed';
 import { entityDisplay } from "./entityDisplay.ts";
 import { contentCreatorDisplay } from "./contentCreator.ts";
@@ -9,6 +9,17 @@ export function managerDisplay(manager: Manager) {
   return entityDisplay(manager, {
     label: "Manager Display",
     detail: (m) => m.toDetailString(),
+    fields: [{
+      label: "State",
+      getValue: (m) => m.state,
+      setValue: async (m, value) => {
+        if (!managerStates.includes(value as any)) {
+          console.error(`Invalid state "${value}". Valid states: ${managerStates.join(", ")}`);
+          return;
+        }
+        await m.setState(value as typeof managerStates[number]);
+      },
+    }],
     extend: ({ display, unsubscribe, registerFocusable }) => {
       const ccList = blessed.list({
         parent: display,
