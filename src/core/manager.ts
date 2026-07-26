@@ -3,9 +3,10 @@ import { ContentCreator } from "./contentCreator.ts";
 import { Entity, type EntityData } from "./db.ts";
 
 export type ManagerState = "online" | "starting" | "offline" | "shuttingDown" | "stuck";
-export const managerStates: ManagerState[] = ["online", "starting", "offline", "shuttingDown", "stuck"];
 interface ManagerData extends EntityData {
   state: ManagerState;
+  maxAllocatedCreators: number;
+  maxAllocatedEditors: number;
 }
 
 const stateColor = {

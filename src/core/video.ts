@@ -1,6 +1,6 @@
 import { Entity, type EntityData } from "./db.ts";
 
-export type VideoState = "notStarted" | "workingOn" | "finished";
+export type VideoState = "notStarted" | "workingOn" | "completed" | "posted";
 interface VideoData extends EntityData {
   contentCreatorID?: string;
   state: VideoState;

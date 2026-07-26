@@ -1,11 +1,11 @@
-import { ContentCreator, contentCreatorStates } from "#core/contentCreator";
+import { ContentCreator } from "#core/contentCreator";
 import { entityDisplay } from "./entityDisplay.ts";
 
 export function contentCreatorDisplay(contentCreator: ContentCreator) {
   return entityDisplay(contentCreator, {
     label: "Content Creator Display",
     detail: (cc) => cc.toDetailString(),
-    fields: [{
+    fields: [/*{
       label: "State",
       getValue: (cc) => cc.state,
       setValue: async (cc, value) => {
@@ -15,7 +15,7 @@ export function contentCreatorDisplay(contentCreator: ContentCreator) {
         }
         await cc.setState(value as typeof contentCreatorStates[number]);
       },
-    }],
+    }*/],
     extraActions: [{
       label: "Delete",
       run: async () => await contentCreator.delete()
