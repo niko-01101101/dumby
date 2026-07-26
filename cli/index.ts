@@ -7,7 +7,6 @@ import { managerDisplay } from './displays/manager.ts';
 import { contentCreatorDisplay } from './displays/contentCreator.ts';
 import { editorDisplay } from './displays/editor.ts';
 import { videoDisplay } from './displays/video.ts';
-import type { Entity } from '#core/db';
 
 const manager = await Manager.load("main");
 await manager?.loadContentCreators();

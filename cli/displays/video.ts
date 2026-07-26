@@ -6,7 +6,7 @@ export function videoDisplay(video: Video, opts?: { back?: () => void }) {
     label: "Video Display",
     detail: (v) => v.toDetailString(),
     back: opts?.back,
-    extraActions: [{
+    extraActions: () => [{
       label: "Delete",
       run: async () => await video.delete()
     }]

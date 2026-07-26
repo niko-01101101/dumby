@@ -3,10 +3,19 @@ import type { Widgets } from 'blessed';
 import { screen, showList, setCurrentBack } from "../index.ts";
 
 export interface DisplayableEntity {
-  readonly state: string;
-  shutdown(): Promise<void>;
-  start(): Promise<void>;
   on(evt: "change", fn: () => void): () => void;
+}
+
+export interface StartShutdownEntity {
+  readonly state: string;
+  start(): Promise<void>;
+  shutdown(): Promise<void>;
+}
+
+export function startShutdownAction(entity: StartShutdownEntity): EntityAction {
+  return entity.state === "online"
+    ? { label: 'Shutdown', run: () => { entity.shutdown(); } }
+    : { label: 'Start', run: () => { entity.start(); } };
 }
 
 export interface EntityDisplayExtension {
@@ -30,7 +39,7 @@ export interface EntityDisplayOptions<E extends DisplayableEntity> {
   label: string;
   detail: (entity: E) => string;
   extend?: (ctx: EntityDisplayCtx) => EntityDisplayExtension | void;
-  extraActions?: EntityAction[];
+  extraActions?: (entity: E) => EntityAction[];
   fields?: EditableField<E>[];
   back?: (() => void) | undefined;
 }
@@ -69,10 +78,7 @@ export function entityDisplay<E extends DisplayableEntity>(entity: E, options: E
   function buildActions(): EntityAction[] {
     return [
       { label: 'Back', run: goBack },
-      entity.state === "online"
-        ? { label: 'Shutdown', run: () => { entity.shutdown(); } }
-        : { label: 'Start', run: () => { entity.start(); } },
-      ...(options.extraActions ?? [])];
+      ...(options.extraActions?.(entity) ?? [])];
   }
 
   let actions = buildActions();
@@ -101,7 +107,7 @@ export function entityDisplay<E extends DisplayableEntity>(entity: E, options: E
     top: 0,
     right: 0,
     width: '33%',
-    height: fields.length ? '50%' : '100%-1',
+    height: fields.length ? '50%' : '50%-1 ',
     tags: true,
     border: { type: 'line' },
   });

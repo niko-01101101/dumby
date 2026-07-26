@@ -1,6 +1,6 @@
 import { Manager } from "#core/manager";
 import blessed from 'blessed';
-import { entityDisplay } from "./entityDisplay.ts";
+import { entityDisplay, startShutdownAction } from "./entityDisplay.ts";
 import { contentCreatorDisplay } from "./contentCreator.ts";
 import { ContentCreator } from "#core/contentCreator";
 import { randomID } from "#core/db";
@@ -41,7 +41,7 @@ export function managerDisplay(manager: Manager, opts?: { back?: () => void }) {
         },
       };
     },
-    extraActions: [{
+    extraActions: (m) => [startShutdownAction(m), {
       label: "Add Content Creator",
       run: async () => {
         const newCC = await ContentCreator.load(randomID());
