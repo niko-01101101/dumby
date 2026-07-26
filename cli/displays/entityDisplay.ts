@@ -1,6 +1,6 @@
 import blessed from 'blessed';
 import type { Widgets } from 'blessed';
-import { screen, showList } from "../index.ts";
+import { screen, showList, setCurrentBack } from "../index.ts";
 
 export interface DisplayableEntity {
   readonly state: string;
@@ -15,7 +15,8 @@ export interface EntityDisplayExtension {
 
 export interface EntityDisplayCtx {
   display: Widgets.BoxElement;
-  unsubscribe: () => void;
+  pause: () => void;
+  show: () => void;
   registerFocusable: (el: Widgets.ListElement) => void;
 }
 
@@ -31,13 +32,20 @@ export interface EntityDisplayOptions<E extends DisplayableEntity> {
   extend?: (ctx: EntityDisplayCtx) => EntityDisplayExtension | void;
   extraActions?: EntityAction[];
   fields?: EditableField<E>[];
+  back?: (() => void) | undefined;
 }
 
 export interface EntityAction {
   label: string;
   run: () => void;
 }
-export function entityDisplay<E extends DisplayableEntity>(entity: E, options: EntityDisplayOptions<E>) {
+
+export interface EntityDisplayHandle {
+  display: Widgets.BoxElement;
+  show: () => void;
+}
+
+export function entityDisplay<E extends DisplayableEntity>(entity: E, options: EntityDisplayOptions<E>): EntityDisplayHandle {
   const display = blessed.box({
     parent: screen,
     width: '100%',
@@ -48,11 +56,19 @@ export function entityDisplay<E extends DisplayableEntity>(entity: E, options: E
   });
   display.setLabel(options.label);
 
-  let unsubscribe = () => { };
+  function pause() {
+    display.hide();
+    unsubscribe();
+  }
+
+  function goBack() {
+    pause();
+    (options.back ?? showList)();
+  }
 
   function buildActions(): EntityAction[] {
     return [
-      { label: 'Back', run: () => { display.hide(); showList(); unsubscribe(); } },
+      { label: 'Back', run: goBack },
       entity.state === "online"
         ? { label: 'Shutdown', run: () => { entity.shutdown(); } }
         : { label: 'Start', run: () => { entity.start(); } },
@@ -154,7 +170,8 @@ export function entityDisplay<E extends DisplayableEntity>(entity: E, options: E
 
   const extension = options.extend?.({
     display,
-    unsubscribe: () => unsubscribe(),
+    pause,
+    show: () => show(),
     registerFocusable: addFocusable,
   });
 
@@ -167,26 +184,36 @@ export function entityDisplay<E extends DisplayableEntity>(entity: E, options: E
 
   const focusNext = () => cycleFocus(1);
   const focusPrevious = () => cycleFocus(-1);
-  screen.key(['tab'], focusNext);
-  screen.key(['S-tab'], focusPrevious);
 
-  const stopListening = entity.on("change", () => {
-    data.setContent(options.detail(entity));
-    refreshFields();
-    actions = buildActions();
-    actionList.setItems(actions.map((a) => a.label));
-    extension?.onChange?.();
-    screen.render();
-  });
+  let stopListening = () => { };
 
-  unsubscribe = () => {
+  function subscribe() {
+    stopListening = entity.on("change", () => {
+      data.setContent(options.detail(entity));
+      refreshFields();
+      actions = buildActions();
+      actionList.setItems(actions.map((a) => a.label));
+      extension?.onChange?.();
+      screen.render();
+    });
+    screen.key(['tab'], focusNext);
+    screen.key(['S-tab'], focusPrevious);
+  }
+
+  function unsubscribe() {
     stopListening();
     screen.unkey('tab', focusNext);
     screen.unkey('S-tab', focusPrevious);
-  };
+  }
 
-  display.show();
-  actionList.focus();
-  screen.render();
-  return display;
+  function show() {
+    subscribe();
+    display.show();
+    setCurrentBack(goBack);
+    actionList.focus();
+    screen.render();
+  }
+
+  show();
+  return { display, show };
 }

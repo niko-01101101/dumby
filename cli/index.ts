@@ -1,14 +1,22 @@
 import blessed from 'blessed';
 import { Manager } from '#core/manager';
 import { ContentCreator } from '#core/contentCreator';
+import { Editor } from '#core/editor';
+import { Video } from '#core/video';
 import { managerDisplay } from './displays/manager.ts';
 import { contentCreatorDisplay } from './displays/contentCreator.ts';
+import { editorDisplay } from './displays/editor.ts';
+import { videoDisplay } from './displays/video.ts';
 import type { Entity } from '#core/db';
 
 const manager = await Manager.load("main");
 await manager?.loadContentCreators();
 
-const entities = manager ? [manager, ...manager.contentCreators].filter((e) => e !== undefined) : [];
+const contentCreators = manager?.contentCreators ?? [];
+const editors = contentCreators.flatMap((cc) => cc?.editors ?? []);
+const videos = editors.flatMap((e) => e?.videos ?? []);
+
+const entities = manager ? [manager, ...contentCreators, ...editors, ...videos].filter((e) => e !== undefined) : [];
 let focusedEntity: typeof entities[number] | undefined;
 
 export const screen = blessed.screen({
@@ -73,17 +81,26 @@ entities.map((e) => e.on("change", () => {
   list.setItems(entities.map((e) => e.toString()));
 }));
 
+let currentBack: () => void = showList;
+
+export function setCurrentBack(fn: () => void) {
+  currentBack = fn;
+}
+
 function openDisplay(entity: typeof entities[number]) {
   focusedEntity = entity;
   list.hide();
 
   entity instanceof Manager ? managerDisplay(entity) :
     entity instanceof ContentCreator ? contentCreatorDisplay(entity) :
-      undefined;
+      entity instanceof Editor ? editorDisplay(entity) :
+        entity instanceof Video ? videoDisplay(entity) :
+          undefined;
 }
 
 export function showList() {
   focusedEntity = undefined;
+  currentBack = showList;
   list.show();
   list.focus();
   screen.render();
@@ -109,7 +126,7 @@ async function quit() {
 
 screen.key(['q', 'escape'], () => {
   if (focusedEntity) {
-    showList();
+    currentBack();
     return;
   }
   void quit();

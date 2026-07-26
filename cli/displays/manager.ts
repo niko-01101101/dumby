@@ -5,22 +5,12 @@ import { contentCreatorDisplay } from "./contentCreator.ts";
 import { ContentCreator } from "#core/contentCreator";
 import { randomID } from "#core/db";
 
-export function managerDisplay(manager: Manager) {
+export function managerDisplay(manager: Manager, opts?: { back?: () => void }) {
   return entityDisplay(manager, {
     label: "Manager Display",
     detail: (m) => m.toDetailString(),
-    fields: [/*{
-      label: "State",
-      getValue: (m) => m.state,
-      setValue: async (m, value) => {
-        if (!managerStates.includes(value as any)) {
-          console.error(`Invalid state "${value}". Valid states: ${managerStates.join(", ")}`);
-          return;
-        }
-        await m.setState(value as typeof managerStates[number]);
-      },
-    }*/],
-    extend: ({ display, unsubscribe, registerFocusable }) => {
+    back: opts?.back,
+    extend: ({ display, pause, show, registerFocusable }) => {
       const ccList = blessed.list({
         parent: display,
         bottom: 0,
@@ -41,9 +31,8 @@ export function managerDisplay(manager: Manager) {
       ccList.on('select', (_item, index) => {
         const cc = manager.contentCreators[index];
         if (!cc) return;
-        display.hide();
-        unsubscribe();
-        contentCreatorDisplay(cc);
+        pause();
+        contentCreatorDisplay(cc, { back: show });
       });
 
       return {

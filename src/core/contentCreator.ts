@@ -45,9 +45,15 @@ export class ContentCreator extends Entity<ContentCreatorData> {
   }
 
   editors: (Editor | undefined)[] = [];
-  async loadContentCreators() {
+  async loadEditors() {
     const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT id FROM ${Editor.table} WHERE contentCreatorID = ? AND deletedAt IS NULL`, [this.id]);
     this.editors = await Promise.all(rows.map(async (e) => await Editor.load(e.id)));
+  }
+
+  async addEditor(editor: Editor) {
+    await editor.setContentCreator(this);
+    this.editors.push(editor);
+    this.notify("change");
   }
 
   get state() { return this.data.state }
@@ -55,6 +61,7 @@ export class ContentCreator extends Entity<ContentCreatorData> {
 
   async onLoad() {
     this.manager = await Manager.load(this.data.managerID);
+    await this.loadEditors();
   }
 
   async shutdown() {
