@@ -1,9 +1,10 @@
+import type { RowDataPacket } from "mysql2";
 import { Entity, type EntityData } from "./db.ts";
+import { Editor } from "./editor.ts";
 import { Manager } from "./manager.ts";
 
+type ContentCreatorModel = "laguna-s-2.1" | "laguna-xs-2.1";
 export type ContentCreatorState = "online" | "starting" | "offline" | "shuttingDown" | "stuck";
-export const contentCreatorStates: ContentCreatorState[] = ["online", "starting", "offline", "shuttingDown", "stuck"];
-
 interface ContentCreatorData extends EntityData {
   managerID?: string;
   state: ContentCreatorState;
@@ -26,11 +27,24 @@ export class ContentCreator extends Entity<ContentCreatorData> {
     await this.set("managerID", m.id);
   }
 
+  editors: (Editor | undefined)[] = [];
+  async loadEditors() {
+    const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT id FROM ${Editor.table} WHERE contentCreatorID = ? AND deletedAt IS NULL`, [this.id]);
+    this.editors = await Promise.all(rows.map(async (e) => await Editor.load(e.id)));
+  }
+
+  async addEditor(editor: Editor) {
+    await editor.setContentCreator(this);
+    this.editors.push(editor);
+    this.notify("change");
+  }
+
   get state() { return this.data.state }
   async setState(s: ContentCreatorState) { this.data.state = s; await this.set("state", s); }
 
   async onLoad() {
     this.manager = await Manager.load(this.data.managerID);
+    await this.loadEditors();
   }
 
   async shutdown() {
