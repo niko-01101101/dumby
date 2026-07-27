@@ -1,5 +1,5 @@
 import { createWriteStream } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
@@ -32,7 +32,11 @@ interface PexelsSearchResponse { videos: PexelsVideo[]; }
 
 export async function fetchPexelsClip(query: string, destPath: string): Promise<void> {
   const apiKey = requireEnv("PEXELS_API_KEY");
-  const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=1`;
+  // Short-form output is a vertical 1080x1920 canvas (see ffmpeg.ts) — asking
+  // Pexels for portrait-shot source footage up front means less of the frame
+  // has to be cropped away to fill it, instead of relying entirely on the
+  // compile-time crop to fix up whatever orientation happened to come back.
+  const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=1&orientation=portrait`;
   const res = await fetch(url, { headers: { Authorization: apiKey }, signal: AbortSignal.timeout(API_FETCH_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`Pexels search failed: ${res.status} ${res.statusText}`);
 
@@ -92,15 +96,85 @@ export async function fetchFreesoundMusic(query: string, destPath: string): Prom
   await downloadToFile(previewUrl, destPath);
 }
 
+// Twitch gameplay clips, added to the Editor's toolkit (todo.txt) alongside
+// Pexels/Pixabay stock footage for tasks that call for actual game footage
+// rather than generic B-roll — neither stock service indexes real gameplay.
+// Twitch's Helix API needs an app access token (client-credentials grant),
+// not a user OAuth login: same "keyed search, no OAuth dance" shape as
+// Pexels/Pixabay/Freesound above, just with an extra token-fetch step, since
+// Helix doesn't accept the client id/secret directly on each request.
+interface TwitchToken { token: string; expiresAt: number; }
+let twitchToken: TwitchToken | undefined;
+
+async function getTwitchAppToken(): Promise<string> {
+  if (twitchToken && twitchToken.expiresAt > Date.now()) return twitchToken.token;
+
+  const clientId = requireEnv("TWITCH_CLIENT_ID");
+  const clientSecret = requireEnv("TWITCH_CLIENT_SECRET");
+  const url = `https://id.twitch.tv/oauth2/token?client_id=${clientId}&client_secret=${clientSecret}&grant_type=client_credentials`;
+  const res = await fetch(url, { method: "POST", signal: AbortSignal.timeout(API_FETCH_TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`Twitch app token request failed: ${res.status} ${res.statusText}`);
+
+  const data = await res.json() as { access_token: string; expires_in: number };
+  // Refresh a minute early rather than exactly on expiry, so a token that's
+  // about to lapse mid-request doesn't get reused right up to the wire.
+  twitchToken = { token: data.access_token, expiresAt: Date.now() + (data.expires_in - 60) * 1000 };
+  return twitchToken.token;
+}
+
+function twitchAuthHeaders(clientId: string, token: string): Record<string, string> {
+  return { "Client-Id": clientId, Authorization: `Bearer ${token}` };
+}
+
+interface TwitchGame { id: string; }
+interface TwitchGamesResponse { data: TwitchGame[]; }
+interface TwitchClip { id: string; thumbnail_url: string; }
+interface TwitchClipsResponse { data: TwitchClip[]; }
+
+// A clip's downloadable .mp4 isn't in the API response directly — Twitch
+// derives it from the thumbnail URL by dropping the "-preview-<WxH>.jpg"
+// suffix and appending ".mp4", a widely-relied-on convention rather than a
+// documented field (Helix's own "get clip" response only ever exposes the
+// thumbnail and an embeddable player URL, not a raw file).
+function clipDownloadUrl(thumbnailUrl: string): string {
+  return `${thumbnailUrl.replace(/-preview-\d+x\d+\.jpg$/, "")}.mp4`;
+}
+
+export async function fetchTwitchGameplayClip(query: string, destPath: string): Promise<void> {
+  const clientId = requireEnv("TWITCH_CLIENT_ID");
+  const token = await getTwitchAppToken();
+  const headers = twitchAuthHeaders(clientId, token);
+
+  const gameRes = await fetch(`https://api.twitch.tv/helix/games?name=${encodeURIComponent(query)}`, {
+    headers,
+    signal: AbortSignal.timeout(API_FETCH_TIMEOUT_MS),
+  });
+  if (!gameRes.ok) throw new Error(`Twitch game lookup failed: ${gameRes.status} ${gameRes.statusText}`);
+  const gameData = await gameRes.json() as TwitchGamesResponse;
+  const game = gameData.data[0];
+  if (!game) throw new Error(`Twitch has no game matching "${query}"`);
+
+  const clipsRes = await fetch(`https://api.twitch.tv/helix/clips?game_id=${game.id}&first=1`, {
+    headers,
+    signal: AbortSignal.timeout(API_FETCH_TIMEOUT_MS),
+  });
+  if (!clipsRes.ok) throw new Error(`Twitch clip search failed: ${clipsRes.status} ${clipsRes.statusText}`);
+  const clipsData = await clipsRes.json() as TwitchClipsResponse;
+  const clip = clipsData.data[0];
+  if (!clip) throw new Error(`Twitch returned no clips for "${query}"`);
+
+  await downloadToFile(clipDownloadUrl(clip.thumbnail_url), destPath);
+}
+
 // Nothing bounds how long a model's reply can get (no token limit is set on
 // the Ollama chat calls in ContentCreator/Editor), and VOICEOVER hands that
-// reply straight to Piper as narration text. A stuck/repetitive model could
-// hand Piper an enormous script, which would otherwise just run — however
-// long that takes — with no feedback until it's done. This timeout turns an
-// unbounded synthesis into a clear, bounded failure instead.
+// reply straight to the TTS engine as narration text. A stuck/repetitive
+// model could hand it an enormous script, which would otherwise just run —
+// however long that takes — with no feedback until it's done. This timeout
+// turns an unbounded synthesis into a clear, bounded failure instead.
 const PIPER_TIMEOUT_MS = 2 * 60 * 1000;
 
-export async function synthesizeVoiceover(text: string, destPath: string): Promise<void> {
+async function synthesizeWithPiper(text: string, destPath: string): Promise<void> {
   await mkdir(dirname(destPath), { recursive: true });
   const bin = process.env.PIPER_BIN ?? "piper";
   const model = requireEnv("PIPER_VOICE_MODEL");
@@ -124,4 +198,91 @@ export async function synthesizeVoiceover(text: string, destPath: string): Promi
     proc.stdin.write(text);
     proc.stdin.end();
   });
+}
+
+// Google Cloud Text-to-Speech — default voiceover engine (see CLAUDE.md).
+// Called directly via its REST API with an API key (same convention as
+// Gemini in llm.ts and the Pexels/Pixabay/Freesound fetchers above) rather
+// than the `@google-cloud/text-to-speech` SDK, so this stays a plain-`fetch`
+// dependency like the rest of the file. Needs the Cloud Text-to-Speech API
+// enabled on whatever GCP project `GOOGLE_TTS_API_KEY` belongs to — that can
+// be the same key/project already used for `GEMINI_API_KEY`, or a separate
+// one; a distinct env var is used either way so one key's quota isn't
+// silently shared across two unrelated services.
+//
+// `audioEncoding: "LINEAR16"` is requested specifically because Google's
+// synthesize endpoint wraps LINEAR16 PCM in a WAV container automatically —
+// matching the .wav Piper already produces means callers don't need to know
+// or care which engine actually ran.
+//
+// A 429 here is Google Cloud's standard quota-exceeded response (same shape
+// as Gemini's in llm.ts). Treated as "free-tier quota exhausted for this
+// key" and made sticky for the rest of the process (see `synthesizeVoiceover`
+// below) — retrying a known-exhausted quota on every voiceover would just be
+// another way to burn through whatever's left of it.
+class GoogleTtsQuotaError extends Error { }
+let googleTtsExhausted = false;
+
+function googleTtsVoice(): string {
+  return process.env.GOOGLE_TTS_VOICE ?? "en-US-Neural2-C";
+}
+
+// Google wants languageCode ("en-US") separately from the voice name
+// ("en-US-Neural2-C") that already encodes it — derived here so overriding
+// GOOGLE_TTS_VOICE doesn't also require setting a second, redundant env var.
+function googleTtsLanguageCode(voice: string): string {
+  const [lang, region] = voice.split("-");
+  return lang && region ? `${lang}-${region}` : "en-US";
+}
+
+interface GoogleTtsResponse { audioContent?: string; }
+
+async function synthesizeWithGoogleTts(text: string, destPath: string): Promise<void> {
+  const apiKey = requireEnv("GOOGLE_TTS_API_KEY");
+  const voice = googleTtsVoice();
+  const url = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      input: { text },
+      voice: { languageCode: googleTtsLanguageCode(voice), name: voice },
+      audioConfig: { audioEncoding: "LINEAR16" },
+    }),
+    signal: AbortSignal.timeout(API_FETCH_TIMEOUT_MS),
+  });
+
+  if (res.status === 429) throw new GoogleTtsQuotaError("Google Cloud TTS quota exhausted (429)");
+  if (!res.ok) throw new Error(`Google Cloud TTS request failed: ${res.status} ${res.statusText}`);
+
+  const data = await res.json() as GoogleTtsResponse;
+  if (!data.audioContent) throw new Error("Google Cloud TTS returned no audio content");
+
+  await mkdir(dirname(destPath), { recursive: true });
+  await writeFile(destPath, Buffer.from(data.audioContent, "base64"));
+}
+
+export type VoiceoverEngine = "google-tts" | "piper";
+
+// Tries Google Cloud TTS first (if GOOGLE_TTS_API_KEY is set and not yet
+// known to be quota-exhausted), falling back to local Piper — mirrors
+// llm.ts's chat()/Gemini-then-Ollama pattern exactly, including the sticky
+// exhausted flag. Returns which engine actually produced the audio so
+// callers can record it on the Media row rather than assuming Piper.
+export async function synthesizeVoiceover(text: string, destPath: string): Promise<VoiceoverEngine> {
+  if (process.env.GOOGLE_TTS_API_KEY && !googleTtsExhausted) {
+    try {
+      await synthesizeWithGoogleTts(text, destPath);
+      return "google-tts";
+    } catch (e) {
+      if (e instanceof GoogleTtsQuotaError) {
+        googleTtsExhausted = true;
+        console.error(`${e.message} — falling back to local Piper for the rest of this run.`);
+      } else {
+        throw e;
+      }
+    }
+  }
+  await synthesizeWithPiper(text, destPath);
+  return "piper";
 }

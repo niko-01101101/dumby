@@ -4,7 +4,7 @@ import { Manager } from "./manager.ts";
 import { Entity, randomID, type EntityData } from "./db.ts";
 import { compileVideo, type CompileAudio } from "./ffmpeg.ts";
 import { Media } from "./media.ts";
-import { fetchFreesoundMusic, fetchPexelsClip, fetchPixabayClip, synthesizeVoiceover } from "./mediaSources.ts";
+import { fetchFreesoundMusic, fetchPexelsClip, fetchPixabayClip, fetchTwitchGameplayClip, synthesizeVoiceover } from "./mediaSources.ts";
 import { Video } from "./video.ts";
 import { chat } from "./llm.ts";
 
@@ -25,15 +25,27 @@ function stripStageDirections(text: string): string {
 
 type EditorModel = "gemma4:latest";
 type Message = { role: "system" | "user" | "assistant"; content: string };
-const MAX_EDIT_STEPS = 8;
+// todo.txt "Editors not adding music" / "Improve the editor": 8 steps was
+// tight enough that a video needing several clips, a voiceover, AND music
+// routinely ran out of budget before ever reaching an explicit COMPILE (the
+// step-cap fallback in createVideo() would still compile whatever existed,
+// but music - added last in the prompt's suggested order - was often the
+// first casualty). Raised to give every command in the toolkit realistic
+// room in one session; compile() also now backstops music specifically
+// (see below) rather than relying solely on step budget.
+const MAX_EDIT_STEPS = 20;
 const THINK_TIMEOUT_MS = 3 * 60 * 1000;
+// See llm.ts's ChatConfig.maxHistoryMessages — bounds per-call token cost as
+// the loop's history grows across MAX_EDIT_STEPS turns (todo.txt "reduce
+// token spending for gemini").
+const MAX_HISTORY_MESSAGES = 16;
 // Short-form narration should be a few sentences at most. Nothing caps how
 // long a model's reply can get (no token limit is set on the Ollama chat
 // call below), so without this a stuck/repetitive model could hand Piper an
 // arbitrarily long script and produce an arbitrarily long voiceover track.
 const MAX_VOICEOVER_CHARS = 1000;
 
-const KNOWN_COMMANDS = ["PEXELS CLIP", "PIXABAY CLIP", "VOICEOVER", "MUSIC", "COMPILE"]
+const KNOWN_COMMANDS = ["PEXELS CLIP", "PIXABAY CLIP", "GAMEPLAY CLIP", "VOICEOVER", "MUSIC", "COMPILE"]
   .sort((a, b) => b.length - a.length);
 
 function escapeRegex(s: string): string {
@@ -80,10 +92,12 @@ INVOKE: <COMMAND NAME>
 END_INVOKE
 Include at most one INVOKE block. You must call COMPILE to finish — stopping without it, or running out of turns, abandons the video.`;
 
-const editorSystemPrompt = (task: string) => `
+const editorSystemPrompt = (task: string, feedbackContext?: string, existingMediaContext?: string) => `
 YOU ARE AN EXPERIENCED VIDEO EDITOR.
 YOUR JOB IS TO ASSEMBLE A SHORT VIDEO FOR THE FOLLOWING TASK, GIVEN TO YOU BY YOUR CONTENT CREATOR:
 ${task}
+${feedbackContext ? `\n${feedbackContext}\nLET THIS INFORM YOUR EDITING CHOICES (PACING, CLIP SELECTION, TONE OF ANY VOICEOVER) WHERE RELEVANT.\n` : ""}
+${existingMediaContext ? `\n${existingMediaContext}\n` : ""}
 
 YOU HAVE THE ABILITY TO RUN COMMANDS TO GATHER MEDIA AND ASSEMBLE THE VIDEO. FOLLOW THESE RULES EXACTLY:
 - INCLUDE AT MOST ONE INVOKE BLOCK PER RESPONSE. ANYTHING AFTER THE FIRST IS IGNORED.
@@ -98,8 +112,9 @@ END_INVOKE
 AVAILABLE COMMANDS
 PEXELS CLIP <search query> - add a licensed stock video clip
 PIXABAY CLIP <search query> - add a licensed stock video clip
+GAMEPLAY CLIP <game name> - add a real Twitch gameplay clip of the named game. Use this instead of PEXELS/PIXABAY CLIP whenever the task is actually about a video game or its gameplay — stock footage services don't carry real gameplay.
 VOICEOVER <script text> - add a narrated voiceover track. THE SCRIPT TEXT IS SPOKEN ALOUD EXACTLY AS WRITTEN, WORD FOR WORD, BY A TEXT-TO-SPEECH ENGINE. DO NOT INCLUDE TONE, STYLE, OR STAGE DIRECTIONS (e.g. "(cheerfully)", "[upbeat tone]", "*excited*") OR ANY OTHER TEXT THAT ISN'T MEANT TO BE SPOKEN OUT LOUD. ONLY WRITE THE WORDS TO BE NARRATED.
-MUSIC <mood/genre query, e.g. "upbeat lofi", "tense cinematic"> - add a background music track. It plays under the whole video at low volume, automatically ducking further under any voiceover so narration stays clear. Optional, but adds a lot of production value. At most one per video.
+MUSIC <mood/genre query, e.g. "upbeat lofi", "tense cinematic"> - add a background music track. It plays under the whole video at low volume, automatically ducking further under any voiceover so narration stays clear. Add this to every video for production value, before COMPILE — if you skip it, COMPILE will still add a generic one automatically. At most one per video.
 COMPILE - assemble all added media into the final video. Call this once you have a handful of clips (typically 3-6 for a short-form video) and, if the task calls for narration, a voiceover. This is your last step.
 `;
 
@@ -166,16 +181,31 @@ export class Editor extends Entity<EditorData> {
     return media;
   }
 
+  async addGameplayClip(video: Video, query: string) {
+    const media = await Media.load(randomID());
+    if (!media) throw new Error(`Failed to create new Media`);
+    await media.setKind("clip");
+    await media.setSource("twitch");
+    await media.setSourceRef(query);
+
+    const destPath = path.join(mediaDir(), video.id, `${media.id}.mp4`);
+    await fetchTwitchGameplayClip(query, destPath);
+    await media.setLocalPath(destPath);
+
+    await video.addMedia(media);
+    return media;
+  }
+
   async addVoiceover(video: Video, text: string) {
     const media = await Media.load(randomID());
     if (!media) throw new Error(`Failed to create new Media`);
     await media.setKind("audio");
-    await media.setSource("piper");
     await media.setSourceRef(text);
 
     const script = stripStageDirections(text);
     const destPath = path.join(mediaDir(), video.id, `${media.id}.wav`);
-    await synthesizeVoiceover(script, destPath);
+    const engine = await synthesizeVoiceover(script, destPath);
+    await media.setSource(engine);
     await media.setLocalPath(destPath);
 
     await video.addMedia(media);
@@ -200,10 +230,26 @@ export class Editor extends Entity<EditorData> {
   async compile(video: Video): Promise<string> {
     await video.loadMedia();
 
+    // todo.txt "Editors not adding music": MUSIC is easy for a step-budget-
+    // pressed or forgetful model to skip entirely, since it's the one
+    // command with no direct bearing on whether COMPILE succeeds. Rather
+    // than depend on the model remembering, backstop it here — if nothing's
+    // been added by the time compile actually runs, add a generic track
+    // derived from the video's own task prompt so every finished video gets
+    // one. Best-effort: a missing/invalid FREESOUND_API_KEY or a dead-end
+    // search shouldn't block the compile a music track is secondary to.
+    if (!video.media.some((m) => m?.kind === "audio" && m.source === "freesound")) {
+      try {
+        await this.addMusic(video, video.prompt ? `background music for ${video.prompt}` : "upbeat background music");
+      } catch (e: any) {
+        console.error(`Editor(${this.id}) auto-add music for Video(${video.id}) failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
     const clips = video.media
       .filter((m): m is Media => m !== undefined && m.kind === "clip")
       .sort((a, b) => a.position - b.position);
-    const voiceover = video.media.find((m): m is Media => m !== undefined && m.kind === "audio" && m.source === "piper");
+    const voiceover = video.media.find((m): m is Media => m !== undefined && m.kind === "audio" && (m.source === "google-tts" || m.source === "piper"));
     const music = video.media.find((m): m is Media => m !== undefined && m.kind === "audio" && m.source === "freesound");
 
     if (!clips.length) throw new Error(`Video(${video.id}) has no clips to compile`);
@@ -220,20 +266,59 @@ export class Editor extends Entity<EditorData> {
     return outputPath;
   }
 
-  async createVideo(account: Account, task: string): Promise<Video> {
+  // If a previous createVideo() call for this exact task was abandoned mid-
+  // way (step cap hit, process crash, etc.) it left behind a Video stuck in
+  // "notStarted" or "workingOn" with real Media already downloaded/added to
+  // it. Without this, every retry minted a brand-new Video via randomID(),
+  // so that gathered media was simply never looked up again — orphaned on
+  // disk and in the DB, silently re-fetched from scratch instead.
+  private findResumableVideo(account: Account, task: string): Video | undefined {
+    return account.videos.find(
+      (v): v is Video =>
+        v !== undefined &&
+        (v.state === "notStarted" || v.state === "workingOn") &&
+        v.prompt?.trim().toLowerCase() === task.trim().toLowerCase(),
+    );
+  }
+
+  private describeExistingMedia(video: Video): string | undefined {
+    const items = video.media.filter((m): m is Media => m !== undefined);
+    if (!items.length) return undefined;
+    const lines = items.map((m) => {
+      if (m.kind === "clip") return `- ${m.source} clip already added: "${m.sourceRef ?? ""}"`;
+      if (m.kind === "audio" && m.source === "freesound") return `- background music already added: "${m.sourceRef ?? ""}"`;
+      if (m.kind === "audio") return `- voiceover already recorded, do not add another`;
+      return `- ${m.kind} (${m.source}) already added`;
+    });
+    return `THIS VIDEO WAS PREVIOUSLY STARTED AND ABANDONED BEFORE IT WAS FINISHED. THE FOLLOWING MEDIA WAS ALREADY GATHERED FOR IT — DO NOT RE-FETCH ANY OF IT, BUILD ON TOP OF IT INSTEAD:\n${lines.join("\n")}`;
+  }
+
+  async createVideo(account: Account, task: string, feedbackContext?: string): Promise<Video> {
     if (this.state !== "online") throw new Error(`Editor(${this.id}) must be online to create a video`);
 
-    const video = await Video.load(randomID());
-    if (!video) throw new Error(`Failed to create new Video`);
-    await account.addVideo(video);
-    await video.setPrompt(task);
+    await account.loadVideos();
+    const resumed = this.findResumableVideo(account, task);
+    let existingMediaContext: string | undefined;
+
+    let video: Video;
+    if (resumed) {
+      video = resumed;
+      existingMediaContext = this.describeExistingMedia(video);
+      console.log(`Editor(${this.id}) resuming abandoned Video(${video.id}) with ${video.media.filter((m) => m).length} existing media item(s)`);
+    } else {
+      const created = await Video.load(randomID());
+      if (!created) throw new Error(`Failed to create new Video`);
+      await account.addVideo(created);
+      await created.setPrompt(task);
+      video = created;
+    }
     await video.setState("workingOn");
 
     this.activeVideo = video;
     this.history = [];
 
     try {
-      let message = editorSystemPrompt(task);
+      let message = editorSystemPrompt(task, feedbackContext, existingMediaContext);
       for (let step = 0; step < MAX_EDIT_STEPS; step++) {
         if (this.state !== "online") break;
         const done = await this.think(message);
@@ -271,7 +356,7 @@ export class Editor extends Entity<EditorData> {
       this.notify("change");
       // See ContentCreator.think() for why: unbounded history plus a small
       // default context window is a real way to blow the budget mid-session.
-      const handle = chat(this.history, { ollamaModel: this.model, numCtx: 8192 });
+      const handle = chat(this.history, { ollamaModel: this.model, numCtx: 8192, maxHistoryMessages: MAX_HISTORY_MESSAGES });
       this.currentStream = handle;
       // Nothing bounded how long a single turn could take — if the provider
       // stalls (model hung, server unresponsive) awaiting the result below
@@ -334,6 +419,11 @@ export class Editor extends Entity<EditorData> {
         case "PIXABAY CLIP": {
           const media = await this.addPixabayClip(video, context);
           return { message: `Added Pixabay clip(${media.id}) for "${context}"`, ok: true };
+        }
+        case "GAMEPLAY CLIP": {
+          if (!context) return { message: "GAMEPLAY CLIP requires a game name", ok: false };
+          const media = await this.addGameplayClip(video, context);
+          return { message: `Added Twitch gameplay clip(${media.id}) for "${context}"`, ok: true };
         }
         case "VOICEOVER": {
           if (!context) return { message: "VOICEOVER requires script text", ok: false };

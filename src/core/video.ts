@@ -8,6 +8,16 @@ export type VideoState = "notStarted" | "workingOn" | "completed" | "posted";
 interface VideoData extends EntityData {
   accountID?: string;
   prompt?: string;
+  // Manual stand-in for real platform analytics (views/comments) — todo.txt's
+  // self-improvement item asks ContentCreators to react to "people's
+  // response," but this codebase deliberately avoids the OAuth user-login
+  // dance every platform's real metrics API would require (see CLAUDE.md's
+  // notes on Freesound/YouTube). A human logs what audience response looked
+  // like here instead (CLI field, see cli/displays/video.ts), and
+  // ContentCreator surfaces it back to itself each session (see
+  // recentFeedback() in contentCreator.ts) as a real input into its next
+  // SET PERSONALITY/TYPEOFCONTENT decision, and into the next Editor task.
+  feedback?: string;
   state: VideoState;
 }
 
@@ -33,6 +43,9 @@ export class Video extends Entity<VideoData> {
   get prompt() { return this.data.prompt }
   async setPrompt(p: string) { this.data.prompt = p; await this.set("prompt", p) }
 
+  get feedback() { return this.data.feedback }
+  async setFeedback(f: string) { this.data.feedback = f; await this.set("feedback", f) }
+
   media: (Media | undefined)[] = [];
   async loadMedia() {
     const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT id FROM ${Media.table} WHERE videoID = ? AND deletedAt IS NULL ORDER BY position ASC`, [this.id]);
@@ -57,6 +70,7 @@ export class Video extends Entity<VideoData> {
 ${"ID".padEnd(5)} ${this.id}
 ${"State".padEnd(5)} ${stateColor[this.state]} ${this.state.padEnd(11)}
 ${"Prompt".padEnd(10)} ${this.prompt ?? ""}
+${"Feedback".padEnd(10)} ${this.feedback ?? "(none yet)"}
 ${"UpdatedAt".padEnd(10)} ${this.updatedAt.toLocaleString().padEnd(11)}
 ${"CreatedAt".padEnd(10)} ${this.createdAt.toLocaleString().padEnd(11)}
 `

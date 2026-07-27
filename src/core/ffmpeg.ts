@@ -80,9 +80,18 @@ export async function compileVideo(clipPaths: string[], audio: CompileAudio, out
   // first one. Decoding each clip as its own input and normalizing it before
   // joining via the concat *filter* (frame-level, not packet-level) avoids
   // that requirement entirely.
+  //
+  // Stock footage is frequently landscape even when the search query asks
+  // for portrait clips, so scaling to *fit* (force_original_aspect_ratio=
+  // decrease) followed by a black pad left most of a landscape clip's frame
+  // as dead letterbox space — the wrong ratio todo.txt flagged. Scaling to
+  // *cover* (increase) and then center-cropping to the output frame fills
+  // the whole 1080x1920 canvas instead, at the cost of cropping the edges of
+  // non-vertical source footage, which is the standard trade-off short-form
+  // video makes.
   const normalized = clipPaths.map((_, i) =>
-    `[${i}:v]scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,` +
-    `pad=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${OUTPUT_FPS}[v${i}]`
+    `[${i}:v]scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:force_original_aspect_ratio=increase,` +
+    `crop=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT},setsar=1,fps=${OUTPUT_FPS}[v${i}]`
   );
   const concatInputs = clipPaths.map((_, i) => `[v${i}]`).join("");
   const filters = [...normalized, `${concatInputs}concat=n=${clipPaths.length}:v=1:a=0[vcat]`];

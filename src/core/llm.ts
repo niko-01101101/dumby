@@ -5,13 +5,16 @@
 //
 // Gemini is the primary backend when GEMINI_API_KEY is set, called directly
 // via its REST API (no new npm dependency, same convention as
-// researchSources.ts/mediaSources.ts). The first time a call comes back
-// 429/RESOURCE_EXHAUSTED (the standard googleapis.com quota-exceeded
-// signal), that's treated as "free-tier quota exhausted for this key" and
-// every call for the rest of the process falls back to local Ollama —
-// intentionally sticky rather than re-probed per call, since retrying a
-// known-exhausted quota on every single turn would just be another way to
-// burn through it.
+// researchSources.ts/mediaSources.ts). Three tiers, degrading in order:
+// GEMINI_MODEL (or its default, see geminiModel() below) -> the
+// "gemini-flash-lite-latest" alias specifically, since it carries its own,
+// separate free-tier quota bucket -> local Ollama. Each 429/RESOURCE_EXHAUSTED
+// (the standard googleapis.com quota-exceeded signal) sticks the process at
+// the next tier down for the rest of the run rather than re-probing the
+// exhausted one per call, since retrying a known-exhausted quota on every
+// single turn would just be another way to burn through it. If GEMINI_MODEL
+// is unset (or already IS "gemini-flash-lite-latest"), the middle tier is
+// identical to the first and is skipped, going straight to Ollama on 429.
 
 import { Ollama } from "ollama";
 
@@ -20,6 +23,16 @@ export type ChatMessage = { role: "system" | "user" | "assistant"; content: stri
 export interface ChatConfig {
   ollamaModel: string;
   numCtx?: number;
+  // ContentCreator/Editor never trim their own `history` array — it's resent
+  // in full on every turn, so token cost per call grows with every step of
+  // an 8-12 step loop (roughly O(steps^2) total tokens across a session).
+  // Gemini's free tier is metered per-minute, so that growth is the main
+  // lever left for todo.txt's "reduce token spending" beyond the thinking-
+  // budget/model choice already applied below. Keeping the first message
+  // (the system prompt carrying personality/task/goal) plus only the most
+  // recent `maxHistoryMessages` entries bounds the request size without
+  // losing the context a turn actually needs to act correctly.
+  maxHistoryMessages?: number;
 }
 
 export interface ChatHandle {
@@ -28,7 +41,11 @@ export interface ChatHandle {
 }
 
 const ollama = new Ollama();
-let geminiExhausted = false;
+
+// Three-tier degradation ladder: 0 = primary (geminiModel()), 1 = the
+// "gemini-flash-lite-latest" fallback specifically, 2 = Ollama only. Sticky
+// once it drops a level — see the top-of-file comment for why.
+let geminiTier: 0 | 1 | 2 = 0;
 
 // "gemini-flash-lite-latest" is an alias Google maintains to always point at
 // their current recommended lite-flash model, rather than a pinned version —
@@ -39,12 +56,23 @@ let geminiExhausted = false;
 // its free tier turned out to allow only 5 requests/minute against this key
 // (confirmed via the 429 body: "limit: 5, model: gemini-3.6-flash") — an
 // 8-step think loop blows through that almost instantly. The "-lite" alias
-// survived 8 rapid calls with no 429 in testing.
+// survived 8 rapid calls with no 429 in testing — it's both the default
+// primary model below and the dedicated fallback tier a non-default
+// GEMINI_MODEL degrades to before Ollama.
+const GEMINI_FALLBACK_MODEL = "gemini-flash-lite-latest";
+
 function geminiModel(): string {
-  return process.env.GEMINI_MODEL ?? "gemini-flash-lite-latest";
+  return process.env.GEMINI_MODEL ?? GEMINI_FALLBACK_MODEL;
 }
 
 class GeminiQuotaError extends Error { }
+
+function trimHistory(messages: ChatMessage[], max: number | undefined): ChatMessage[] {
+  if (!max || messages.length <= max) return messages;
+  const [first, ...rest] = messages;
+  if (!first) return messages;
+  return [first, ...rest.slice(-(max - 1))];
+}
 
 // Gemini's `contents` array only has "user"/"model" roles, with no mid-
 // conversation "system" turn the way Ollama's chat API allows — but this
@@ -73,8 +101,8 @@ interface GeminiResponse {
   candidates?: { content?: { parts?: { text?: string }[] } }[];
 }
 
-async function chatWithGemini(messages: ChatMessage[], apiKey: string, signal: AbortSignal): Promise<string> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel()}:generateContent?key=${apiKey}`;
+async function chatWithGemini(messages: ChatMessage[], apiKey: string, model: string, signal: AbortSignal): Promise<string> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -123,28 +151,51 @@ async function chatWithOllama(messages: ChatMessage[], model: string, numCtx: nu
 }
 
 // Fires off a chat turn against Gemini (if configured and not yet known to
-// be quota-exhausted) falling back to local Ollama, and returns a handle
-// whose `abort()` cancels whichever provider is actually in flight — mirrors
-// the shape the old direct-Ollama-stream call gave callers, so
-// ContentCreator/Editor's interrupt()/timeout logic didn't need to change.
+// be fully quota-exhausted), degrading through the primary model -> the
+// flash-lite fallback -> local Ollama as each tier's quota is hit, and
+// returns a handle whose `abort()` cancels whichever provider is actually in
+// flight — mirrors the shape the old direct-Ollama-stream call gave callers,
+// so ContentCreator/Editor's interrupt()/timeout logic didn't need to change.
 export function chat(messages: ChatMessage[], config: ChatConfig): ChatHandle {
   const controller = new AbortController();
+  const trimmed = trimHistory(messages, config.maxHistoryMessages);
 
   const result = (async () => {
     const geminiKey = process.env.GEMINI_API_KEY;
-    if (geminiKey && !geminiExhausted) {
+    const primary = geminiModel();
+
+    if (geminiKey && geminiTier === 0) {
       try {
-        return await chatWithGemini(messages, geminiKey, controller.signal);
+        return await chatWithGemini(trimmed, geminiKey, primary, controller.signal);
       } catch (e) {
         if (e instanceof GeminiQuotaError) {
-          geminiExhausted = true;
-          console.error(`${e.message} — falling back to local Ollama for the rest of this run.`);
+          // If the primary model already IS the fallback model (the default
+          // case, GEMINI_MODEL unset), there's no distinct tier to degrade
+          // to — retrying the identical model would just re-hit the same
+          // exhausted quota, so skip straight to Ollama.
+          geminiTier = primary === GEMINI_FALLBACK_MODEL ? 2 : 1;
+          const next = geminiTier === 1 ? GEMINI_FALLBACK_MODEL : "local Ollama";
+          console.error(`${e.message} (model: ${primary}) — degrading to ${next} for the rest of this run.`);
         } else {
           throw e;
         }
       }
     }
-    return await chatWithOllama(messages, config.ollamaModel, config.numCtx, controller.signal);
+
+    if (geminiKey && geminiTier === 1) {
+      try {
+        return await chatWithGemini(trimmed, geminiKey, GEMINI_FALLBACK_MODEL, controller.signal);
+      } catch (e) {
+        if (e instanceof GeminiQuotaError) {
+          geminiTier = 2;
+          console.error(`${e.message} (model: ${GEMINI_FALLBACK_MODEL}) — falling back to local Ollama for the rest of this run.`);
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    return await chatWithOllama(trimmed, config.ollamaModel, config.numCtx, controller.signal);
   })();
 
   return { result, abort: () => controller.abort() };

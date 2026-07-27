@@ -31,6 +31,15 @@ interface ContentCreatorData extends EntityData {
 
 const MAX_THINK_STEPS = 8;
 const THINK_TIMEOUT_MS = 3 * 60 * 1000;
+// See llm.ts's ChatConfig.maxHistoryMessages — bounds per-call token cost as
+// the loop's history grows across MAX_THINK_STEPS turns (todo.txt "reduce
+// token spending for gemini").
+const MAX_HISTORY_MESSAGES = 16;
+// How many of this ContentCreator's own most recent videos to remind it of
+// each session (todo.txt "ContentCreators produce similar content" / self-
+// improvement) — enough to spot a repeated topic/angle without bloating the
+// system prompt with its entire back catalog.
+const RECENT_VIDEO_CONTEXT_LIMIT = 5;
 // A reply with no recognizable command is meant to signal "nothing further
 // to do" (see the system prompt), but small local models often produce one
 // confused, command-less reply without actually being done. Only treat it
@@ -216,8 +225,32 @@ export class ContentCreator extends Entity<ContentCreatorData> {
     const editor = this.manager?.findAvailableEditor();
     if (!editor) return "No online Editor available under your Manager to build this video — ask your Manager to add and start one";
     if (editor.state === "sleeping") await editor.start();
-    const video = await editor.createVideo(account, task);
+    // todo.txt "self improvement ... have this impact editors too" — the
+    // same recent-videos/feedback summary that steers this ContentCreator's
+    // own next move (see recentVideoContext(), used in start()) also rides
+    // along as editing context, so an Editor's tone/pacing choices react to
+    // audience response too, not just the ContentCreator's.
+    const video = await editor.createVideo(account, task, this.recentVideoContext(3));
     return `Editor(${editor.id}) created Video(${video.id}) under Account(${account.id})`;
+  }
+
+  // Gathers this ContentCreator's own most recent videos (prompt + state +
+  // any manually-logged audience feedback, see Video.feedback) into a text
+  // block. Used two ways: injected into the session's system prompt so it
+  // can see (and avoid repeating) its own recent topics/angles, and passed
+  // along to Editor.createVideo() so feedback also shapes editing choices.
+  private recentVideoContext(limit = RECENT_VIDEO_CONTEXT_LIMIT): string {
+    const videos = this.accounts
+      .filter((a): a is Account => a !== undefined)
+      .flatMap((a) => a.videos.filter((v): v is Video => v !== undefined))
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, limit);
+    if (!videos.length) return "";
+
+    const lines = videos.map((v) =>
+      `- "${v.prompt ?? "(no prompt)"}" [${v.state}]${v.feedback ? ` — feedback: ${v.feedback}` : ""}`
+    );
+    return `YOUR ${videos.length} MOST RECENT VIDEOS — avoid repeating the same topic or angle, and let any feedback below inform your next SET PERSONALITY/SET TYPEOFCONTENT and CREATE VIDEO choices:\n${lines.join("\n")}`;
   }
 
   get state() { return this.data.state }
@@ -257,6 +290,8 @@ export class ContentCreator extends Entity<ContentCreatorData> {
       this.history = [];
       this._goal = "";
       let message = contentCreatorSystemPrompt(this.personality, this.typeOfContent);
+      const recentContext = this.recentVideoContext();
+      if (recentContext) message += `\n\n${recentContext}`;
       if (wakeReason) message += `\n\nYOU WERE JUST WOKEN UP. REASON: ${wakeReason}`;
       let misses = 0;
       for (let step = 0; step < MAX_THINK_STEPS; step++) {
@@ -302,7 +337,7 @@ export class ContentCreator extends Entity<ContentCreatorData> {
       // many models), which errors out mid-session. Ollama silently
       // truncates older messages once actual usage exceeds num_ctx rather
       // than erroring, so raising it buys real headroom for an 8-step loop.
-      const handle = chat(this.history, { ollamaModel: this.model, numCtx: 8192 });
+      const handle = chat(this.history, { ollamaModel: this.model, numCtx: 8192, maxHistoryMessages: MAX_HISTORY_MESSAGES });
       this.currentStream = handle;
       // Nothing bounded how long a single turn could take — if the provider
       // stalls (model hung, server unresponsive) awaiting the result below

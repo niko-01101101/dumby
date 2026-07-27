@@ -2,7 +2,7 @@ import { Entity, type EntityData } from "./db.ts";
 import { Video } from "./video.ts";
 
 export type MediaKind = "clip" | "image" | "audio";
-export type MediaSourceType = "generated" | "pexels" | "pixabay" | "piper" | "freesound";
+export type MediaSourceType = "generated" | "pexels" | "pixabay" | "twitch" | "piper" | "google-tts" | "freesound";
 
 interface MediaData extends EntityData {
   videoID?: string;
