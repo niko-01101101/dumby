@@ -1,12 +1,12 @@
 import type { RowDataPacket } from "mysql2";
 import { Entity, type EntityData } from "./db.ts";
-import { Editor } from "./editor.ts";
+import { Account } from "./account.ts";
 import { Media } from "./media.ts";
 
 export type VideoState = "notStarted" | "workingOn" | "completed" | "posted";
 
 interface VideoData extends EntityData {
-  editorID?: string;
+  accountID?: string;
   prompt?: string;
   state: VideoState;
 }
@@ -21,10 +21,10 @@ const stateColor = {
 export class Video extends Entity<VideoData> {
   static table = "videos";
 
-  editor: Editor | undefined;
-  async setEditor(editor: Editor) {
-    this.editor = editor;
-    await this.set("editorID", editor.id);
+  account: Account | undefined;
+  async setAccount(account: Account) {
+    this.account = account;
+    await this.set("accountID", account.id);
   }
 
   get state() { return this.data.state }
@@ -47,7 +47,7 @@ export class Video extends Entity<VideoData> {
   }
 
   async onLoad() {
-    this.editor = await Editor.load(this.data.editorID);
+    this.account = await Account.load(this.data.accountID);
     await this.loadMedia();
   }
 

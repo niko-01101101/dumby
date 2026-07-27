@@ -1,10 +1,10 @@
-import type { RowDataPacket } from "mysql2";
 import path from "node:path";
-import { ContentCreator } from "./contentCreator.ts";
+import type { Account } from "./account.ts";
+import { Manager } from "./manager.ts";
 import { Entity, randomID, type EntityData } from "./db.ts";
-import { compileVideo } from "./ffmpeg.ts";
+import { compileVideo, type CompileAudio } from "./ffmpeg.ts";
 import { Media } from "./media.ts";
-import { fetchPexelsClip, fetchPixabayClip, synthesizeVoiceover } from "./mediaSources.ts";
+import { fetchFreesoundMusic, fetchPexelsClip, fetchPixabayClip, synthesizeVoiceover } from "./mediaSources.ts";
 import { Video } from "./video.ts";
 import { chat } from "./llm.ts";
 
@@ -33,7 +33,7 @@ const THINK_TIMEOUT_MS = 3 * 60 * 1000;
 // arbitrarily long script and produce an arbitrarily long voiceover track.
 const MAX_VOICEOVER_CHARS = 1000;
 
-const KNOWN_COMMANDS = ["PEXELS CLIP", "PIXABAY CLIP", "VOICEOVER", "COMPILE"]
+const KNOWN_COMMANDS = ["PEXELS CLIP", "PIXABAY CLIP", "VOICEOVER", "MUSIC", "COMPILE"]
   .sort((a, b) => b.length - a.length);
 
 function escapeRegex(s: string): string {
@@ -99,12 +99,13 @@ AVAILABLE COMMANDS
 PEXELS CLIP <search query> - add a licensed stock video clip
 PIXABAY CLIP <search query> - add a licensed stock video clip
 VOICEOVER <script text> - add a narrated voiceover track. THE SCRIPT TEXT IS SPOKEN ALOUD EXACTLY AS WRITTEN, WORD FOR WORD, BY A TEXT-TO-SPEECH ENGINE. DO NOT INCLUDE TONE, STYLE, OR STAGE DIRECTIONS (e.g. "(cheerfully)", "[upbeat tone]", "*excited*") OR ANY OTHER TEXT THAT ISN'T MEANT TO BE SPOKEN OUT LOUD. ONLY WRITE THE WORDS TO BE NARRATED.
+MUSIC <mood/genre query, e.g. "upbeat lofi", "tense cinematic"> - add a background music track. It plays under the whole video at low volume, automatically ducking further under any voiceover so narration stays clear. Optional, but adds a lot of production value. At most one per video.
 COMPILE - assemble all added media into the final video. Call this once you have a handful of clips (typically 3-6 for a short-form video) and, if the task calls for narration, a voiceover. This is your last step.
 `;
 
 export type EditorState = "online" | "starting" | "offline" | "shuttingDown" | "stuck";
 interface EditorData extends EntityData {
-  contentCreatorID?: string;
+  managerID?: string;
   state: EditorState;
 }
 
@@ -123,22 +124,10 @@ export class Editor extends Entity<EditorData> {
   private activeVideo: Video | undefined;
   history: Message[] = [];
 
-  contentCreator: ContentCreator | undefined;
-  async setContentCreator(cc: any) {
-    this.contentCreator = cc;
-    await this.set("contentCreatorID", cc.id);
-  }
-
-  videos: (Video | undefined)[] = [];
-  async loadVideos() {
-    const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT id FROM ${Video.table} WHERE editorID = ? AND deletedAt IS NULL`, [this.id]);
-    this.videos = await Promise.all(rows.map(async (v) => await Video.load(v.id)));
-  }
-
-  async addVideo(video: Video) {
-    await video.setEditor(this);
-    this.videos.push(video);
-    this.notify("change");
+  manager: Manager | undefined;
+  async setManager(m: any) {
+    this.manager = m;
+    await this.set("managerID", m.id);
   }
 
   async addPexelsClip(video: Video, query: string) {
@@ -187,31 +176,50 @@ export class Editor extends Entity<EditorData> {
     return media;
   }
 
+  async addMusic(video: Video, query: string) {
+    const media = await Media.load(randomID());
+    if (!media) throw new Error(`Failed to create new Media`);
+    await media.setKind("audio");
+    await media.setSource("freesound");
+    await media.setSourceRef(query);
+
+    const destPath = path.join(mediaDir(), video.id, `${media.id}.mp3`);
+    await fetchFreesoundMusic(query, destPath);
+    await media.setLocalPath(destPath);
+
+    await video.addMedia(media);
+    return media;
+  }
+
   async compile(video: Video): Promise<string> {
     await video.loadMedia();
 
     const clips = video.media
       .filter((m): m is Media => m !== undefined && m.kind === "clip")
       .sort((a, b) => a.position - b.position);
-    const audio = video.media.find((m): m is Media => m !== undefined && m.kind === "audio");
+    const voiceover = video.media.find((m): m is Media => m !== undefined && m.kind === "audio" && m.source === "piper");
+    const music = video.media.find((m): m is Media => m !== undefined && m.kind === "audio" && m.source === "freesound");
 
     if (!clips.length) throw new Error(`Video(${video.id}) has no clips to compile`);
     const clipPaths = clips.map((c) => c.localPath);
     if (clipPaths.some((p) => !p)) throw new Error(`Video(${video.id}) has a clip with no downloaded media`);
 
     const outputPath = path.join(mediaDir(), `${video.id}.mp4`);
-    await compileVideo(clipPaths as string[], audio?.localPath, outputPath);
+    const audio: CompileAudio = {};
+    if (voiceover?.localPath) audio.voiceoverPath = voiceover.localPath;
+    if (music?.localPath) audio.musicPath = music.localPath;
+    await compileVideo(clipPaths as string[], audio, outputPath);
 
     await video.setState("completed");
     return outputPath;
   }
 
-  async createVideo(task: string): Promise<Video> {
+  async createVideo(account: Account, task: string): Promise<Video> {
     if (this.state !== "online") throw new Error(`Editor(${this.id}) must be online to create a video`);
 
     const video = await Video.load(randomID());
     if (!video) throw new Error(`Failed to create new Video`);
-    await this.addVideo(video);
+    await account.addVideo(video);
     await video.setPrompt(task);
     await video.setState("workingOn");
 
@@ -329,6 +337,11 @@ export class Editor extends Entity<EditorData> {
           const media = await this.addVoiceover(video, context);
           return { message: `Added voiceover(${media.id})`, ok: true };
         }
+        case "MUSIC": {
+          if (!context) return { message: "MUSIC requires a mood/genre query", ok: false };
+          const media = await this.addMusic(video, context);
+          return { message: `Added background music(${media.id}) for "${context}"`, ok: true };
+        }
         case "COMPILE": {
           const outputPath = await this.compile(video);
           return { message: `Compiled -> ${outputPath}`, ok: true };
@@ -352,8 +365,7 @@ export class Editor extends Entity<EditorData> {
   async setState(s: EditorState) { this.data.state = s; await this.set("state", s); }
 
   async onLoad() {
-    this.contentCreator = await ContentCreator.load(this.data.contentCreatorID);
-    await this.loadVideos();
+    this.manager = await Manager.load(this.data.managerID);
   }
 
   async shutdown() {
@@ -365,8 +377,8 @@ export class Editor extends Entity<EditorData> {
   }
 
   async start() {
-    if (this.contentCreator && this.contentCreator?.state !== "online") {
-      console.log(`Editor(${this.id}) Start Failed : Content Creator is not Online`);
+    if (this.manager && this.manager?.state !== "online") {
+      console.log(`Editor(${this.id}) Start Failed : Manager is not Online`);
       return;
     }
     console.log(`Editor(${this.id}) Starting...`);

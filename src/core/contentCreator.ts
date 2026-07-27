@@ -1,6 +1,7 @@
 import type { RowDataPacket } from "mysql2";
 import { Entity, randomID, type EntityData } from "./db.ts";
-import { Editor } from "./editor.ts";
+import { Account } from "./account.ts";
+import type { Editor } from "./editor.ts";
 import { Manager } from "./manager.ts";
 import type { Video } from "./video.ts";
 import {
@@ -33,7 +34,7 @@ const MAX_CONSECUTIVE_MISSES = 3;
 
 const KNOWN_COMMANDS = [
   "SET GOAL", "SET PERSONALITY", "SET TYPEOFCONTENT",
-  "CREATE EDITOR", "START EDITOR", "CREATE VIDEO",
+  "CREATE ACCOUNT", "CREATE VIDEO",
   "LIST EDITORS", "LIST VIDEOS", "LIST ACCOUNTS",
   "SEARCH HACKER NEWS", "SEARCH NEWS", "HACKER NEWS TRENDS",
   "GOOGLE TRENDS", "YOUTUBE TRENDING",
@@ -127,12 +128,11 @@ GOOGLE TRENDS <region code (optional, defaults to US)> - see today's top trendin
 YOUTUBE TRENDING <region code (optional, defaults to US)> - see today's most popular YouTube videos.
 
 PRODUCTION
-CREATE EDITOR - hire a new Editor to build videos for you (do this first if LIST EDITORS is empty). New Editors start offline.
-START EDITOR - turn on an offline Editor. An Editor must be online before it can be given a video to build.
-CREATE VIDEO <task description> - hands the task to an online Editor, who assembles the video and reports back. Fails if no Editor is online yet. Be specific: describe the story/topic, the angle, and the tone, not just a subject.
-LIST EDITORS - list your Editors, with their state.
-LIST VIDEOS - list videos across all of your Editors, with their state.
-LIST ACCOUNTS - list known accounts (not yet implemented — always returns a stub message).
+CREATE ACCOUNT <description> - set up an account for your content (do this first if LIST ACCOUNTS is empty). <description> is what that account's content is centered around.
+CREATE VIDEO <task description> - hands the task to an online Editor (a shared resource your Manager provisions — you don't create your own), who builds the video under one of your Accounts and reports back. Fails if you have no Account yet, or no Editor is online. Be specific: describe the story/topic, the angle, and the tone, not just a subject.
+LIST EDITORS - list Editors available under your Manager, with their state.
+LIST VIDEOS - list videos across all of your Accounts, with their state.
+LIST ACCOUNTS - list your Accounts, with their content description.
 `;
 
 const stateColor = {
@@ -162,15 +162,15 @@ export class ContentCreator extends Entity<ContentCreatorData> {
     await this.set("managerID", m.id);
   }
 
-  editors: (Editor | undefined)[] = [];
-  async loadEditors() {
-    const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT id FROM ${Editor.table} WHERE contentCreatorID = ? AND deletedAt IS NULL`, [this.id]);
-    this.editors = await Promise.all(rows.map(async (e) => await Editor.load(e.id)));
+  accounts: (Account | undefined)[] = [];
+  async loadAccounts() {
+    const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT id FROM ${Account.table} WHERE contentCreatorID = ? AND deletedAt IS NULL`, [this.id]);
+    this.accounts = await Promise.all(rows.map(async (a) => await Account.load(a.id)));
   }
 
-  async addEditor(editor: Editor) {
-    await editor.setContentCreator(this);
-    this.editors.push(editor);
+  async addAccount(account: Account) {
+    await account.setContentCreator(this);
+    this.accounts.push(account);
     this.notify("change");
   }
 
@@ -179,7 +179,7 @@ export class ContentCreator extends Entity<ContentCreatorData> {
 
   async onLoad() {
     this.manager = await Manager.load(this.data.managerID);
-    await this.loadEditors();
+    await this.loadAccounts();
   }
 
   async shutdown() {
@@ -187,8 +187,8 @@ export class ContentCreator extends Entity<ContentCreatorData> {
     await this.setState("shuttingDown");
     this.interrupt();
 
-    await Promise.all(this.editors.map(async (e) => { await e?.shutdown(); }));
-
+    // Accounts have no online/offline lifecycle (like Video, see video.ts) —
+    // only Editors do, and those now belong to the Manager, not to us.
     await this.setState("offline");
     console.log(`ContentCreator(${this.id}) Offline`);
   }
@@ -304,36 +304,36 @@ export class ContentCreator extends Entity<ContentCreatorData> {
           await this.setTypeOfContent(context);
           return `Type Of Content set to: ${context}`;
         }
-        case "CREATE EDITOR": {
-          const editor = await Editor.load(randomID());
-          if (!editor) return "Failed to create new Editor";
-          await this.addEditor(editor);
-          return `Created Editor(${editor.id})`;
-        }
-        case "START EDITOR": {
-          const editor = this.editors.find((e): e is Editor => e !== undefined && e.state !== "online");
-          if (!editor) return "No offline Editor available to start — run CREATE EDITOR first";
-          await editor.start();
-          return `Editor(${editor.id}) is now ${editor.state}`;
+        case "CREATE ACCOUNT": {
+          if (!context) return "CREATE ACCOUNT requires a content description";
+          const account = await Account.load(randomID());
+          if (!account) return "Failed to create new Account";
+          await this.addAccount(account);
+          await account.setContentDescription(context);
+          return `Created Account(${account.id})`;
         }
         case "CREATE VIDEO": {
-          const editor = this.editors.find((e): e is Editor => e !== undefined && e.state === "online");
-          if (!editor) return "No online Editor available to build this video — run CREATE EDITOR then START EDITOR first";
-          const video = await editor.createVideo(context);
-          return `Editor(${editor.id}) created Video(${video.id})`;
+          const account = this.accounts.find((a): a is Account => a !== undefined);
+          if (!account) return "No Account available to build this video under — run CREATE ACCOUNT first";
+          const editor = this.manager?.editors.find((e): e is Editor => e !== undefined && e.state === "online");
+          if (!editor) return "No online Editor available under your Manager to build this video — ask your Manager to add and start one";
+          const video = await editor.createVideo(account, context);
+          return `Editor(${editor.id}) created Video(${video.id}) under Account(${account.id})`;
         }
         case "LIST EDITORS": {
-          const editors = this.editors.filter((e): e is Editor => e !== undefined);
-          return editors.length ? editors.map((e) => `${e.id} (${e.state})`).join(", ") : "No editors";
+          const editors = (this.manager?.editors ?? []).filter((e): e is Editor => e !== undefined);
+          return editors.length ? editors.map((e) => `${e.id} (${e.state})`).join(", ") : "No editors available under your Manager";
         }
         case "LIST VIDEOS": {
-          const videos: Video[] = this.editors
-            .filter((e): e is Editor => e !== undefined)
-            .flatMap((e) => e.videos.filter((v): v is Video => v !== undefined));
+          const videos: Video[] = this.accounts
+            .filter((a): a is Account => a !== undefined)
+            .flatMap((a) => a.videos.filter((v): v is Video => v !== undefined));
           return videos.length ? videos.map((v) => `${v.id} (${v.state})`).join(", ") : "No videos";
         }
-        case "LIST ACCOUNTS":
-          return "Accounts not yet implemented";
+        case "LIST ACCOUNTS": {
+          const accounts = this.accounts.filter((a): a is Account => a !== undefined);
+          return accounts.length ? accounts.map((a) => `${a.id} (${a.contentDescription ?? "no description"})`).join(", ") : "No accounts";
+        }
         case "SEARCH NEWS": {
           if (!context) return "SEARCH NEWS requires a search query";
           return await searchNews(context);

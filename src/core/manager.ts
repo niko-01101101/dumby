@@ -1,5 +1,6 @@
 import type { RowDataPacket } from "mysql2";
 import { ContentCreator } from "./contentCreator.ts";
+import { Editor } from "./editor.ts";
 import { Entity, type EntityData } from "./db.ts";
 
 export type ManagerState = "online" | "starting" | "offline" | "shuttingDown" | "stuck";
@@ -47,16 +48,33 @@ export class Manager extends Entity<ManagerData> {
     this.notify("change");
   }
 
+  private _editors: (Editor | undefined)[] = [];
+  get editors() { return this._editors }
+  async loadEditors() {
+    const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT id FROM ${Editor.table} WHERE managerID = ? AND deletedAt IS NULL`, [this.id]);
+    this._editors = await Promise.all(rows.map(async (e) => await Editor.load(e.id)));
+  }
+
+  async addEditor(editor: Editor) {
+    await editor.setManager(this);
+    this.editors.push(editor);
+    this.notify("change");
+  }
+
   async onLoad() {
     this.start();
     await this.loadContentCreators();
+    await this.loadEditors();
   }
 
   async shutdown() {
     console.log(`Manager(${this.id}) Shutting Down...`);
     await this.setState("shuttingDown");
 
-    await Promise.all(this.contentCreators.map(async (cc) => { await cc?.shutdown(); }));
+    await Promise.all([
+      ...this.contentCreators.map(async (cc) => { await cc?.shutdown(); }),
+      ...this.editors.map(async (e) => { await e?.shutdown(); }),
+    ]);
 
     await this.setState("offline");
     console.log(`Manager(${this.id}) Offline`);
@@ -66,7 +84,10 @@ export class Manager extends Entity<ManagerData> {
     console.log(`Manager(${this.id}) Starting...`);
     await this.setState("starting");
 
-    await Promise.all(this.contentCreators.map(async (cc) => { await cc?.start(); }));
+    await Promise.all([
+      ...this.contentCreators.map(async (cc) => { await cc?.start(); }),
+      ...this.editors.map(async (e) => { await e?.start(); }),
+    ]);
 
     await this.setState("online");
     console.log(`Manager(${this.id}) Online`);

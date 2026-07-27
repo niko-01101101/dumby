@@ -63,6 +63,35 @@ export async function fetchPixabayClip(query: string, destPath: string): Promise
   await downloadToFile(file.url, destPath);
 }
 
+interface FreesoundResult { id: number; previews: Record<string, string>; duration: number; }
+interface FreesoundSearchResponse { results: FreesoundResult[]; }
+
+// Freesound is a sound-effects/field-recordings library first and a music
+// library second, so results for a mood/genre query are hit-or-miss compared
+// to a curated music service — it was picked anyway because, like
+// Pexels/Pixabay for video, it's keyed search with no OAuth dance: the normal
+// full-quality download endpoint requires an OAuth2 user token, but the
+// "previews" (a standard set of lower-bitrate transcodes Freesound generates
+// for every upload, meant for in-browser playback before download) are public
+// CDN URLs servable with just the api key used for search — good enough
+// quality for background music sitting under other audio in a short-form video.
+const durationFilter = "duration:[15 TO 300]";
+
+export async function fetchFreesoundMusic(query: string, destPath: string): Promise<void> {
+  const apiKey = requireEnv("FREESOUND_API_KEY");
+  const url = `https://freesound.org/apiv2/search/text/?query=${encodeURIComponent(query)}&token=${apiKey}&fields=id,previews,duration&filter=${encodeURIComponent(durationFilter)}&sort=score`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(API_FETCH_TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`Freesound search failed: ${res.status} ${res.statusText}`);
+
+  const data = await res.json() as FreesoundSearchResponse;
+  const sound = data.results[0];
+  if (!sound) throw new Error(`Freesound returned no results for "${query}"`);
+  const previewUrl = sound.previews["preview-hq-mp3"] ?? sound.previews["preview-lq-mp3"];
+  if (!previewUrl) throw new Error(`Freesound sound ${sound.id} has no downloadable preview`);
+
+  await downloadToFile(previewUrl, destPath);
+}
+
 // Nothing bounds how long a model's reply can get (no token limit is set on
 // the Ollama chat calls in ContentCreator/Editor), and VOICEOVER hands that
 // reply straight to Piper as narration text. A stuck/repetitive model could

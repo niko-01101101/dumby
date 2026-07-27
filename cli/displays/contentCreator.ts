@@ -1,9 +1,9 @@
 import { ContentCreator } from "#core/contentCreator";
-import { Editor } from "#core/editor";
+import { Account } from "#core/account";
 import { randomID } from "#core/db";
 import blessed from 'blessed';
 import { entityDisplay, refreshListItems, startShutdownAction } from "./entityDisplay.ts";
-import { editorDisplay } from "./editor.ts";
+import { accountDisplay } from "./account.ts";
 
 export function contentCreatorDisplay(contentCreator: ContentCreator, opts?: { back?: () => void }) {
   return entityDisplay(contentCreator, {
@@ -52,7 +52,7 @@ export function contentCreatorDisplay(contentCreator: ContentCreator, opts?: { b
         display.screen.render();
       });
 
-      const editorList = blessed.list({
+      const accountList = blessed.list({
         parent: display,
         bottom: 0,
         left: 0,
@@ -66,29 +66,29 @@ export function contentCreatorDisplay(contentCreator: ContentCreator, opts?: { b
         style: { selected: { bg: 'blue' } },
       });
 
-      editorList.setLabel("Editors");
-      registerFocusable(editorList);
+      accountList.setLabel("Accounts");
+      registerFocusable(accountList);
 
-      editorList.on('select', (_item, index) => {
-        const editor = contentCreator.editors[index];
-        if (!editor) return;
+      accountList.on('select', (_item, index) => {
+        const account = contentCreator.accounts[index];
+        if (!account) return;
         pause();
-        editorDisplay(editor, { back: show });
+        accountDisplay(account, { back: show });
       });
 
       return {
         onChange: () => {
-          refreshListItems(editorList, contentCreator.editors.map((e) => e?.toString() ?? ""));
+          refreshListItems(accountList, contentCreator.accounts.map((a) => a?.toString() ?? ""));
           aiHistory.setContent(contentCreator.history.map((msg) => msg.role === "system" ? `{gray-fg}${msg.content}{/gray-fg}` : msg.content).join("\n"));
         },
       };
     },
     extraActions: (cc) => [startShutdownAction(cc), {
-      label: "Add Editor",
+      label: "Add Account",
       run: async () => {
-        const newEditor = await Editor.load(randomID());
-        if (!newEditor) throw new Error(`Failed to create new Editor`);
-        contentCreator.addEditor(newEditor);
+        const newAccount = await Account.load(randomID());
+        if (!newAccount) throw new Error(`Failed to create new Account`);
+        contentCreator.addAccount(newAccount);
       }
     }, {
       label: "Delete",

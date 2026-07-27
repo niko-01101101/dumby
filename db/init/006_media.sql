@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS media (
   id VARCHAR(36) NOT NULL PRIMARY KEY,
   videoID VARCHAR(36) NULL,
   kind ENUM('clip', 'image', 'audio') NOT NULL DEFAULT 'clip',
-  source ENUM('generated', 'pexels', 'pixabay', 'piper') NOT NULL DEFAULT 'generated',
+  source ENUM('generated', 'pexels', 'pixabay', 'piper', 'freesound') NOT NULL DEFAULT 'generated',
   sourceRef TEXT NULL,
   localPath TEXT NULL,
   position INT NOT NULL DEFAULT 0,

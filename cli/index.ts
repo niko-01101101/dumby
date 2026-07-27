@@ -2,21 +2,25 @@ import blessed from 'blessed';
 import { Manager } from '#core/manager';
 import { ContentCreator } from '#core/contentCreator';
 import { Editor } from '#core/editor';
+import { Account } from '#core/account';
 import { Video } from '#core/video';
 import { refreshListItems } from './displays/entityDisplay.ts';
 import { managerDisplay } from './displays/manager.ts';
 import { contentCreatorDisplay } from './displays/contentCreator.ts';
 import { editorDisplay } from './displays/editor.ts';
+import { accountDisplay } from './displays/account.ts';
 import { videoDisplay } from './displays/video.ts';
 
 const manager = await Manager.load("main");
 await manager?.loadContentCreators();
+await manager?.loadEditors();
 
 const contentCreators = manager?.contentCreators ?? [];
-const editors = contentCreators.flatMap((cc) => cc?.editors ?? []);
-const videos = editors.flatMap((e) => e?.videos ?? []);
+const editors = manager?.editors ?? [];
+const accounts = contentCreators.flatMap((cc) => cc?.accounts ?? []);
+const videos = accounts.flatMap((a) => a?.videos ?? []);
 
-const entities = manager ? [manager, ...contentCreators, ...editors, ...videos].filter((e) => e !== undefined) : [];
+const entities = manager ? [manager, ...contentCreators, ...editors, ...accounts, ...videos].filter((e) => e !== undefined) : [];
 let focusedEntity: typeof entities[number] | undefined;
 
 export const screen = blessed.screen({
@@ -94,8 +98,9 @@ function openDisplay(entity: typeof entities[number]) {
   entity instanceof Manager ? managerDisplay(entity) :
     entity instanceof ContentCreator ? contentCreatorDisplay(entity) :
       entity instanceof Editor ? editorDisplay(entity) :
-        entity instanceof Video ? videoDisplay(entity) :
-          undefined;
+        entity instanceof Account ? accountDisplay(entity) :
+          entity instanceof Video ? videoDisplay(entity) :
+            undefined;
 }
 
 export function showList() {
