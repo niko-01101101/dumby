@@ -103,7 +103,12 @@ MUSIC <mood/genre query, e.g. "upbeat lofi", "tense cinematic"> - add a backgrou
 COMPILE - assemble all added media into the final video. Call this once you have a handful of clips (typically 3-6 for a short-form video) and, if the task calls for narration, a voiceover. This is your last step.
 `;
 
-export type EditorState = "online" | "starting" | "offline" | "shuttingDown" | "stuck";
+// "sleeping" (todo.txt #5) is entered once a video finishes (or is
+// abandoned) and there's no next task queued yet — Manager.findAvailableEditor
+// wakes a sleeping Editor back up (via start()) rather than skipping it, so
+// it still counts as available to the pool, just not actively spending
+// think() calls while idle.
+export type EditorState = "online" | "starting" | "offline" | "shuttingDown" | "stuck" | "sleeping";
 interface EditorData extends EntityData {
   managerID?: string;
   state: EditorState;
@@ -115,6 +120,7 @@ const stateColor = {
   offline: "{black-bg} {/black-bg}",
   shuttingDown: "{red-bg} {/red-bg}",
   stuck: "{yellow-bg} {/yellow-bg}",
+  sleeping: "{cyan-bg} {/cyan-bg}",
 }
 
 export class Editor extends Entity<EditorData> {
@@ -125,7 +131,7 @@ export class Editor extends Entity<EditorData> {
   history: Message[] = [];
 
   manager: Manager | undefined;
-  async setManager(m: any) {
+  async setManager(m: Manager) {
     this.manager = m;
     await this.set("managerID", m.id);
   }
@@ -248,6 +254,9 @@ export class Editor extends Entity<EditorData> {
     } finally {
       if (video.state === "workingOn") await video.setState("notStarted");
       this.activeVideo = undefined;
+      // Done with this task and nothing else queued — sleep until the next
+      // CREATE VIDEO wakes this Editor back up (see Manager.findAvailableEditor).
+      if (this.state === "online") await this.setState("sleeping");
     }
 
     return video;

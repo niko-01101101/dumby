@@ -4,8 +4,9 @@ import { randomID } from "#core/db";
 import blessed from 'blessed';
 import { entityDisplay, refreshListItems } from "./entityDisplay.ts";
 import { videoDisplay } from "./video.ts";
+import { archiveDisplay } from "./archive.ts";
 
-export function accountDisplay(account: Account, opts?: { back?: () => void }) {
+export function accountDisplay(account: Account, opts?: { back?: () => void; onDelete?: () => void }) {
   return entityDisplay(account, {
     label: "Account Display",
     detail: (a) => a.toDetailString(),
@@ -32,7 +33,10 @@ export function accountDisplay(account: Account, opts?: { back?: () => void }) {
         const video = account.videos[index];
         if (!video) return;
         pause();
-        videoDisplay(video, { back: show });
+        videoDisplay(video, {
+          back: show,
+          onDelete: () => { account.removeVideoFromList(video); show(); },
+        });
       });
 
       return {
@@ -41,7 +45,7 @@ export function accountDisplay(account: Account, opts?: { back?: () => void }) {
         },
       };
     },
-    extraActions: () => [{
+    extraActions: (_a, { pause, show }) => [{
       label: "Add Video",
       run: async () => {
         const newVideo = await Video.load(randomID());
@@ -49,8 +53,21 @@ export function accountDisplay(account: Account, opts?: { back?: () => void }) {
         account.addVideo(newVideo);
       }
     }, {
+      label: "Archive: Videos",
+      run: () => {
+        pause();
+        archiveDisplay("Videos", () => account.loadDeletedVideos(), {
+          back: show,
+          onRestore: (video) => { void account.addVideo(video); },
+        });
+      }
+    }, {
       label: "Delete",
-      run: async () => await account.delete()
+      run: async () => {
+        await account.delete();
+        pause();
+        opts?.onDelete ? opts.onDelete() : opts?.back?.();
+      }
     }]
   });
 }

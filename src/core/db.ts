@@ -86,6 +86,21 @@ export abstract class Entity<T extends EntityData> {
     }
   }
 
+  // The soft-delete counterpart to every loadX() method's `WHERE deletedAt IS
+  // NULL` filter — used to back an archive view (list what got deleted under
+  // a given parent) without every entity needing its own hand-written
+  // "loadDeletedFoo" query. `column`/`value` scope it to a parent the same
+  // way loadX() does (e.g. `ContentCreator.loadDeletedByColumn("managerID",
+  // this.id)`).
+  static async loadDeletedByColumn<C extends typeof Entity<any>>(this: C, column: string, value: string): Promise<C["prototype"][]> {
+    const [rows] = await getPool().query<RowDataPacket[]>(
+      `SELECT id FROM ${this.table} WHERE ${column} = ? AND deletedAt IS NOT NULL`,
+      [value],
+    );
+    const loaded = await Promise.all(rows.map((r) => (this as any).load(r.id as string)));
+    return loaded.filter((e): e is C["prototype"] => e !== undefined);
+  }
+
   async set(column: keyof NonstaticField<T>, value: any): Promise<boolean> {
     try {
       await this.pool.execute(`UPDATE ${this.table} SET ${String(column)} = ? WHERE id = ?`, [value, this.id]);
@@ -116,14 +131,28 @@ export abstract class Entity<T extends EntityData> {
 
   async delete(): Promise<boolean> {
     try {
-      await this.pool.execute(`UPDATE ${this.table} SET deletedAt = NOW()`, [this.id]);
+      await this.pool.execute(`UPDATE ${this.table} SET deletedAt = NOW() WHERE id = ?`, [this.id]);
+      this.data.deletedAt = new Date().toISOString();
+      const cacheID = `${this.id}:${this.table}`;
+      entityCache.delete(cacheID);
       this.notify("delete");
       return true;
     } catch (e: any) {
       throw new Error(`Failed to delete Entity(${this.table}, ${this.id})`, { cause: e });
     }
   }
-}
 
-export class EntityList {
+  get deletedAt(): Date | undefined { return this.data.deletedAt ? new Date(this.data.deletedAt) : undefined; }
+  get isDeleted(): boolean { return this.deletedAt !== undefined; }
+
+  async restore(): Promise<boolean> {
+    try {
+      await this.pool.execute(`UPDATE ${this.table} SET deletedAt = NULL WHERE id = ?`, [this.id]);
+      this.data.deletedAt = undefined as unknown as T["deletedAt"];
+      this.notify("change");
+      return true;
+    } catch (e: any) {
+      throw new Error(`Failed to restore Entity(${this.table}, ${this.id})`, { cause: e });
+    }
+  }
 }

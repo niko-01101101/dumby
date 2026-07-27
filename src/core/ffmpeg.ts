@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 // Bounds how long a single compile can run — a malformed or absurdly long
@@ -32,6 +32,14 @@ function runFfmpeg(args: string[]): Promise<void> {
 // speaking — loud enough to be felt, quiet enough to never compete with it.
 const MUSIC_VOLUME = 0.25;
 
+// Clips pulled from Pexels/Pixabay rarely share resolution, aspect ratio, or
+// frame rate with each other. Every clip is normalized to this frame before
+// concatenation (letterboxed on whichever axis it doesn't fill) so the join
+// below is well-defined regardless of source. Short-form output is vertical.
+const OUTPUT_WIDTH = 1080;
+const OUTPUT_HEIGHT = 1920;
+const OUTPUT_FPS = 30;
+
 export interface CompileAudio {
   voiceoverPath?: string;
   musicPath?: string;
@@ -43,56 +51,61 @@ export async function compileVideo(clipPaths: string[], audio: CompileAudio, out
 
   await mkdir(dirname(outputPath), { recursive: true });
 
-  const listPath = `${outputPath}.concat.txt`;
-  // The concat demuxer resolves relative entries against the list file's own
-  // directory, not the process cwd - since the list lives inside mediaDir()
-  // alongside clips whose stored localPath is *itself* already relative to
-  // mediaDir(), a relative entry here would get mediaDir() prepended twice
-  // (e.g. "media/media/<id>/<file>.mp4") and fail to open. Absolute paths sidestep that.
-  const listContents = clipPaths.map((p) => `file '${resolve(p).replace(/'/g, "'\\''")}'`).join("\n");
-  await writeFile(listPath, listContents, "utf8");
+  const args = ["-y"];
+  for (const p of clipPaths) args.push("-i", resolve(p));
 
-  try {
-    const args = ["-y", "-f", "concat", "-safe", "0", "-i", listPath];
-    let nextInput = 1;
-    let voiceoverInput: number | undefined;
-    let musicInput: number | undefined;
+  let nextInput = clipPaths.length;
+  let voiceoverInput: number | undefined;
+  let musicInput: number | undefined;
 
-    if (voiceoverPath) {
-      args.push("-i", voiceoverPath);
-      voiceoverInput = nextInput++;
-    }
-    if (musicPath) {
-      // Looped infinitely so a music track shorter than the finished video
-      // still covers the whole thing — -shortest below then relies on the
-      // video (and voiceover, if any) to be the stream that actually ends,
-      // trimming an infinite loop down rather than cutting the video early
-      // if the track happens to be the shorter of the two.
-      args.push("-stream_loop", "-1", "-i", musicPath);
-      musicInput = nextInput++;
-    }
-
-    args.push("-map", "0:v");
-
-    if (voiceoverInput !== undefined && musicInput !== undefined) {
-      const filter = [
-        `[${musicInput}:a]volume=${MUSIC_VOLUME}[music_vol]`,
-        `[music_vol][${voiceoverInput}:a]sidechaincompress=threshold=0.05:ratio=8:attack=5:release=400[music_duck]`,
-        `[music_duck][${voiceoverInput}:a]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[aout]`,
-      ].join(";");
-      args.push("-filter_complex", filter, "-map", "[aout]", "-shortest");
-    } else if (voiceoverInput !== undefined) {
-      args.push("-map", `${voiceoverInput}:a`, "-shortest");
-    } else if (musicInput !== undefined) {
-      args.push("-filter_complex", `[${musicInput}:a]volume=${MUSIC_VOLUME}[aout]`, "-map", "[aout]", "-shortest");
-    }
-
-    args.push("-c:v", "libx264", "-pix_fmt", "yuv420p");
-    if (voiceoverInput !== undefined || musicInput !== undefined) args.push("-c:a", "aac");
-    args.push(outputPath);
-
-    await runFfmpeg(args);
-  } finally {
-    await rm(listPath, { force: true });
+  if (voiceoverPath) {
+    args.push("-i", voiceoverPath);
+    voiceoverInput = nextInput++;
   }
+  if (musicPath) {
+    // Looped infinitely so a music track shorter than the finished video
+    // still covers the whole thing — -shortest below then relies on the
+    // video (and voiceover, if any) to be the stream that actually ends,
+    // trimming an infinite loop down rather than cutting the video early
+    // if the track happens to be the shorter of the two.
+    args.push("-stream_loop", "-1", "-i", musicPath);
+    musicInput = nextInput++;
+  }
+
+  // The concat *demuxer* (`-f concat`) splices input files at the packet
+  // level and requires every one of them to share codec/resolution/frame
+  // rate — a mismatch mid-splice silently breaks decoding right after the
+  // first clip instead of erroring, which is why a compile with several
+  // clips queued up used to produce a video that was effectively just the
+  // first one. Decoding each clip as its own input and normalizing it before
+  // joining via the concat *filter* (frame-level, not packet-level) avoids
+  // that requirement entirely.
+  const normalized = clipPaths.map((_, i) =>
+    `[${i}:v]scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,` +
+    `pad=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${OUTPUT_FPS}[v${i}]`
+  );
+  const concatInputs = clipPaths.map((_, i) => `[v${i}]`).join("");
+  const filters = [...normalized, `${concatInputs}concat=n=${clipPaths.length}:v=1:a=0[vcat]`];
+
+  const mapArgs = ["-map", "[vcat]"];
+  if (voiceoverInput !== undefined && musicInput !== undefined) {
+    filters.push(
+      `[${musicInput}:a]volume=${MUSIC_VOLUME}[music_vol]`,
+      `[music_vol][${voiceoverInput}:a]sidechaincompress=threshold=0.05:ratio=8:attack=5:release=400[music_duck]`,
+      `[music_duck][${voiceoverInput}:a]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[aout]`,
+    );
+    mapArgs.push("-map", "[aout]", "-shortest");
+  } else if (voiceoverInput !== undefined) {
+    mapArgs.push("-map", `${voiceoverInput}:a`, "-shortest");
+  } else if (musicInput !== undefined) {
+    filters.push(`[${musicInput}:a]volume=${MUSIC_VOLUME}[aout]`);
+    mapArgs.push("-map", "[aout]", "-shortest");
+  }
+
+  args.push("-filter_complex", filters.join(";"), ...mapArgs);
+  args.push("-c:v", "libx264", "-pix_fmt", "yuv420p");
+  if (voiceoverInput !== undefined || musicInput !== undefined) args.push("-c:a", "aac");
+  args.push(outputPath);
+
+  await runFfmpeg(args);
 }

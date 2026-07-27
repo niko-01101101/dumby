@@ -2,7 +2,7 @@ import { Editor } from "#core/editor";
 import blessed from 'blessed';
 import { entityDisplay, startShutdownAction } from "./entityDisplay.ts";
 
-export function editorDisplay(editor: Editor, opts?: { back?: () => void }) {
+export function editorDisplay(editor: Editor, opts?: { back?: () => void; onDelete?: () => void }) {
   return entityDisplay(editor, {
     label: "Editor Display",
     detail: (e) => e.toDetailString(),
@@ -55,9 +55,13 @@ export function editorDisplay(editor: Editor, opts?: { back?: () => void }) {
         },
       };
     },
-    extraActions: (e) => [startShutdownAction(e), {
+    extraActions: (e, { pause }) => [startShutdownAction(e), {
       label: "Delete",
-      run: async () => await editor.delete()
+      run: async () => {
+        await editor.delete();
+        pause();
+        opts?.onDelete ? opts.onDelete() : opts?.back?.();
+      }
     }]
   });
 }

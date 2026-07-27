@@ -12,10 +12,16 @@ import {
   searchNews,
 } from "./researchSources.ts";
 import { chat } from "./llm.ts";
+import { isPlatform, PLATFORMS, platformLabel } from "./platforms.ts";
+import { Reminder } from "./reminder.ts";
 
 type ContentCreatorModel = "gemma4:latest";
 type Message = { role: "system" | "user" | "assistant"; content: string };
-export type ContentCreatorState = "online" | "starting" | "offline" | "shuttingDown" | "stuck";
+// "sleeping" (todo.txt #5) is the terminal state a normal session winds down
+// into — set once the think loop runs out of things to do (see start()) —
+// distinct from "offline" (never started / explicitly shut down). A
+// Reminder (see reminder.ts) is what wakes a sleeping ContentCreator back up.
+export type ContentCreatorState = "online" | "starting" | "offline" | "shuttingDown" | "stuck" | "sleeping";
 interface ContentCreatorData extends EntityData {
   managerID?: string;
   state: ContentCreatorState;
@@ -31,6 +37,10 @@ const THINK_TIMEOUT_MS = 3 * 60 * 1000;
 // as real completion after this many misses in a row, rather than ending
 // the whole session on the very first one.
 const MAX_CONSECUTIVE_MISSES = 3;
+// Fallback release schedule (todo #4) for a ContentCreator whose Manager
+// hasn't set its own — see Manager.releaseIntervalMinutes. 1440min = once a
+// day, the default the todo itself proposes.
+const DEFAULT_RELEASE_INTERVAL_MINUTES = 1440;
 
 const KNOWN_COMMANDS = [
   "SET GOAL", "SET PERSONALITY", "SET TYPEOFCONTENT",
@@ -76,6 +86,13 @@ function parseBareCommand(content: string): { name: string; context: string } | 
 // Sent instead of a bare "Continue." on every turn after the first — the full
 // INVOKE format only appears once, in the system prompt, and small local
 // models drift back to plain prose within a few turns if it isn't reiterated.
+// Kept deliberately (evaluated for removal per todo.txt #9): dropping it
+// reproduces the exact failure it exists to prevent — see parseBareCommand's
+// comment for the fallback that catches what still gets through. The GOAL
+// half specifically was previously invisible outside this reminder (nothing
+// exposed it), which made it look like dead weight; it's now surfaced via
+// the `goal` getter and shown in toDetailString(), so it's an actual piece
+// of session state, not just prompt filler.
 function continueReminder(extra?: string): string {
   return `Continue. Reminder: to run a command, respond with:
 INVOKE: <COMMAND NAME>
@@ -128,7 +145,7 @@ GOOGLE TRENDS <region code (optional, defaults to US)> - see today's top trendin
 YOUTUBE TRENDING <region code (optional, defaults to US)> - see today's most popular YouTube videos.
 
 PRODUCTION
-CREATE ACCOUNT <description> - set up an account for your content (do this first if LIST ACCOUNTS is empty). <description> is what that account's content is centered around.
+CREATE ACCOUNT <platform: youtube | tiktok | instagram_reels> <description> - set up an account for your content (do this first if LIST ACCOUNTS is empty). <platform> is which service the account is on. <description> is what that account's content is centered around.
 CREATE VIDEO <task description> - hands the task to an online Editor (a shared resource your Manager provisions — you don't create your own), who builds the video under one of your Accounts and reports back. Fails if you have no Account yet, or no Editor is online. Be specific: describe the story/topic, the angle, and the tone, not just a subject.
 LIST EDITORS - list Editors available under your Manager, with their state.
 LIST VIDEOS - list videos across all of your Accounts, with their state.
@@ -141,6 +158,7 @@ const stateColor = {
   offline: "{black-bg} {/black-bg}",
   shuttingDown: "{red-bg} {/red-bg}",
   stuck: "{yellow-bg} {/yellow-bg}",
+  sleeping: "{cyan-bg} {/cyan-bg}",
 }
 
 export class ContentCreator extends Entity<ContentCreatorData> {
@@ -148,7 +166,12 @@ export class ContentCreator extends Entity<ContentCreatorData> {
   private currentStream: { abort: () => void } | null = null;
   private model: ContentCreatorModel = "gemma4:latest";
   history: Message[] = [];
-  private currentGoal = "";
+  private _goal = "";
+  // In-memory only, deliberately not persisted: a goal is scoped to one
+  // `start()` session (reset to "" on each start()) rather than a durable
+  // property of the ContentCreator like personality/typeOfContent, so there's
+  // nothing meaningful to reload after a restart.
+  get goal() { return this._goal }
 
   get personality() { return this.data.personality }
   async setPersonality(p: string) { await this.set("personality", p) }
@@ -157,7 +180,7 @@ export class ContentCreator extends Entity<ContentCreatorData> {
   async setTypeOfContent(c: string) { await this.set("typeOfContent", c) }
 
   manager: Manager | undefined;
-  async setManager(m: any) {
+  async setManager(m: Manager) {
     this.manager = m;
     await this.set("managerID", m.id);
   }
@@ -172,6 +195,29 @@ export class ContentCreator extends Entity<ContentCreatorData> {
     await account.setContentCreator(this);
     this.accounts.push(account);
     this.notify("change");
+  }
+
+  removeAccountFromList(account: Account) {
+    this.accounts = this.accounts.filter((a) => a !== account);
+    this.notify("change");
+  }
+
+  async loadDeletedAccounts(): Promise<Account[]> {
+    return Account.loadDeletedByColumn("contentCreatorID", this.id);
+  }
+
+  // One call handles the whole hand-off: pick an Account, ask the Manager
+  // for whichever Editor is free (findAvailableEditor), and pass the task to
+  // it — the caller (dispatchCommand's CREATE VIDEO case) no longer has to
+  // know how an Editor gets found at all.
+  async createVideo(task: string): Promise<string> {
+    const account = this.accounts.find((a): a is Account => a !== undefined);
+    if (!account) return "No Account available to build this video under — run CREATE ACCOUNT first";
+    const editor = this.manager?.findAvailableEditor();
+    if (!editor) return "No online Editor available under your Manager to build this video — ask your Manager to add and start one";
+    if (editor.state === "sleeping") await editor.start();
+    const video = await editor.createVideo(account, task);
+    return `Editor(${editor.id}) created Video(${video.id}) under Account(${account.id})`;
   }
 
   get state() { return this.data.state }
@@ -193,8 +239,11 @@ export class ContentCreator extends Entity<ContentCreatorData> {
     console.log(`ContentCreator(${this.id}) Offline`);
   }
 
-  async start() {
-    console.log(this.manager);
+  // `wakeReason` is set when a Reminder (see reminder.ts) is what triggered
+  // this call rather than a manual Start — surfaced in the system prompt so
+  // the model knows why it's running this time (e.g. its own release
+  // schedule) instead of just seeing a blank slate.
+  async start(wakeReason?: string) {
     if (this.manager && this.manager?.state !== "online") {
       console.log(`ContentCreator(${this.id}) Start Failed : Manager is not Online`);
       return;
@@ -206,7 +255,9 @@ export class ContentCreator extends Entity<ContentCreatorData> {
 
     try {
       this.history = [];
+      this._goal = "";
       let message = contentCreatorSystemPrompt(this.personality, this.typeOfContent);
+      if (wakeReason) message += `\n\nYOU WERE JUST WOKEN UP. REASON: ${wakeReason}`;
       let misses = 0;
       for (let step = 0; step < MAX_THINK_STEPS; step++) {
         if (this.state !== "online") break;
@@ -217,7 +268,20 @@ export class ContentCreator extends Entity<ContentCreatorData> {
           misses++;
           if (misses >= MAX_CONSECUTIVE_MISSES) break;
         }
-        message = continueReminder(this.currentGoal ? `CURRENT GOAL: ${this.currentGoal}` : undefined);
+        message = continueReminder(this._goal ? `CURRENT GOAL: ${this._goal}` : undefined);
+      }
+
+      // Ran out of things to do (or hit the step cap) without being shut
+      // down mid-session — nothing failed, there's just nothing further to
+      // act on right now. Sleep instead of sitting "online" forever, and
+      // schedule the next wake-up per the Manager's release schedule (todo
+      // #4) so the cycle continues unattended.
+      if (this.state === "online") {
+        await this.setState("sleeping");
+        console.log(`ContentCreator(${this.id}) Sleeping`);
+        const intervalMinutes = this.manager?.releaseIntervalMinutes ?? DEFAULT_RELEASE_INTERVAL_MINUTES;
+        const wakeAt = new Date(Date.now() + intervalMinutes * 60_000);
+        await Reminder.schedule("contentCreator", this.id, wakeAt, "Scheduled release cycle — time to check for new content to make.");
       }
     } catch (e: any) {
       await this.setState("offline");
@@ -291,7 +355,8 @@ export class ContentCreator extends Entity<ContentCreatorData> {
       switch (name) {
         case "SET GOAL": {
           if (!context) return "SET GOAL requires a description";
-          this.currentGoal = context;
+          this._goal = context;
+          this.notify("change");
           return `Goal set to: ${context}`;
         }
         case "SET PERSONALITY": {
@@ -305,20 +370,23 @@ export class ContentCreator extends Entity<ContentCreatorData> {
           return `Type Of Content set to: ${context}`;
         }
         case "CREATE ACCOUNT": {
-          if (!context) return "CREATE ACCOUNT requires a content description";
+          const [platformWord, ...rest] = context.split(/\s+/);
+          const description = rest.join(" ").trim();
+          if (!platformWord || !isPlatform(platformWord.toLowerCase())) {
+            return `CREATE ACCOUNT requires a platform (one of: ${PLATFORMS.join(", ")}) followed by a content description`;
+          }
+          if (!description) return "CREATE ACCOUNT requires a content description after the platform";
+          const platform = platformWord.toLowerCase() as typeof PLATFORMS[number];
           const account = await Account.load(randomID());
           if (!account) return "Failed to create new Account";
           await this.addAccount(account);
-          await account.setContentDescription(context);
-          return `Created Account(${account.id})`;
+          await account.setPlatform(platform);
+          await account.setContentDescription(description);
+          return `Created ${platformLabel(platform)} Account(${account.id})`;
         }
         case "CREATE VIDEO": {
-          const account = this.accounts.find((a): a is Account => a !== undefined);
-          if (!account) return "No Account available to build this video under — run CREATE ACCOUNT first";
-          const editor = this.manager?.editors.find((e): e is Editor => e !== undefined && e.state === "online");
-          if (!editor) return "No online Editor available under your Manager to build this video — ask your Manager to add and start one";
-          const video = await editor.createVideo(account, context);
-          return `Editor(${editor.id}) created Video(${video.id}) under Account(${account.id})`;
+          if (!context) return "CREATE VIDEO requires a task description";
+          return await this.createVideo(context);
         }
         case "LIST EDITORS": {
           const editors = (this.manager?.editors ?? []).filter((e): e is Editor => e !== undefined);
@@ -332,7 +400,7 @@ export class ContentCreator extends Entity<ContentCreatorData> {
         }
         case "LIST ACCOUNTS": {
           const accounts = this.accounts.filter((a): a is Account => a !== undefined);
-          return accounts.length ? accounts.map((a) => `${a.id} (${a.contentDescription ?? "no description"})`).join(", ") : "No accounts";
+          return accounts.length ? accounts.map((a) => `${a.id} [${platformLabel(a.platform)}] (${a.contentDescription ?? "no description"})`).join(", ") : "No accounts";
         }
         case "SEARCH NEWS": {
           if (!context) return "SEARCH NEWS requires a search query";
@@ -370,6 +438,7 @@ ${"ID".padEnd(5)} ${this.id}
 ${"State".padEnd(5)} ${stateColor[this.state]} ${this.state.padEnd(11)}
 ${"Personality".padEnd(11)} ${this.personality ?? "(none yet)"}
 ${"Type of Content".padEnd(11)} ${this.typeOfContent ?? "(none yet)"}
+${"Goal".padEnd(11)} ${this.goal || "(none yet)"}
 ${"UpdatedAt".padEnd(10)} ${this.updatedAt.toLocaleString().padEnd(11)}
 ${"CreatedAt".padEnd(10)} ${this.createdAt.toLocaleString().padEnd(11)}
 `

@@ -42,11 +42,16 @@ export interface EditableField<E extends DisplayableEntity> {
   setValue: (entity: E, value: string) => Promise<void> | void;
 }
 
+export interface ExtraActionsCtx {
+  pause: () => void;
+  show: () => void;
+}
+
 export interface EntityDisplayOptions<E extends DisplayableEntity> {
   label: string;
   detail: (entity: E) => string;
   extend?: (ctx: EntityDisplayCtx) => EntityDisplayExtension | void;
-  extraActions?: (entity: E) => EntityAction[];
+  extraActions?: (entity: E, ctx: ExtraActionsCtx) => EntityAction[];
   fields?: EditableField<E>[];
   back?: (() => void) | undefined;
 }
@@ -98,7 +103,7 @@ export function entityDisplay<E extends DisplayableEntity>(entity: E, options: E
   function buildActions(): EntityAction[] {
     return [
       { label: 'Back', run: goBack },
-      ...(options.extraActions?.(entity) ?? [])];
+      ...(options.extraActions?.(entity, { pause, show: () => show() }) ?? [])];
   }
 
   let actions = buildActions();

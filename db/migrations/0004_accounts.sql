@@ -1,7 +1,6 @@
 CREATE TABLE IF NOT EXISTS accounts (
   id VARCHAR(36) NOT NULL PRIMARY KEY,
   contentCreatorID VARCHAR(36) NULL,
-  platform ENUM('youtube', 'tiktok', 'instagram_reels') NOT NULL DEFAULT 'youtube',
   contentDescription TEXT NULL,
   FOREIGN KEY (contentCreatorID) REFERENCES contentCreators(id) ON DELETE CASCADE,
   createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

@@ -1,11 +1,14 @@
 import { ContentCreator } from "#core/contentCreator";
 import { Account } from "#core/account";
 import { randomID } from "#core/db";
+import { PLATFORMS, platformLabel } from "#core/platforms";
 import blessed from 'blessed';
+import { screen } from "../index.ts";
 import { entityDisplay, refreshListItems, startShutdownAction } from "./entityDisplay.ts";
 import { accountDisplay } from "./account.ts";
+import { archiveDisplay } from "./archive.ts";
 
-export function contentCreatorDisplay(contentCreator: ContentCreator, opts?: { back?: () => void }) {
+export function contentCreatorDisplay(contentCreator: ContentCreator, opts?: { back?: () => void; onDelete?: () => void }) {
   return entityDisplay(contentCreator, {
     label: "Content Creator Display",
     detail: (cc) => cc.toDetailString(),
@@ -73,7 +76,10 @@ export function contentCreatorDisplay(contentCreator: ContentCreator, opts?: { b
         const account = contentCreator.accounts[index];
         if (!account) return;
         pause();
-        accountDisplay(account, { back: show });
+        accountDisplay(account, {
+          back: show,
+          onDelete: () => { contentCreator.removeAccountFromList(account); show(); },
+        });
       });
 
       return {
@@ -83,16 +89,61 @@ export function contentCreatorDisplay(contentCreator: ContentCreator, opts?: { b
         },
       };
     },
-    extraActions: (cc) => [startShutdownAction(cc), {
+    extraActions: (cc, { pause, show }) => [startShutdownAction(cc), {
       label: "Add Account",
-      run: async () => {
-        const newAccount = await Account.load(randomID());
-        if (!newAccount) throw new Error(`Failed to create new Account`);
-        contentCreator.addAccount(newAccount);
+      run: () => {
+        const platformPicker = blessed.list({
+          parent: screen,
+          top: 'center',
+          left: 'center',
+          width: '50%',
+          height: PLATFORMS.length + 2,
+          keys: true,
+          vi: true,
+          mouse: true,
+          tags: true,
+          border: { type: 'line' },
+          style: { selected: { bg: 'blue' } },
+        });
+        platformPicker.setLabel(' Platform ');
+        platformPicker.setItems(PLATFORMS.map(platformLabel));
+        platformPicker.focus();
+        screen.render();
+
+        platformPicker.on('select', (_item, index) => {
+          const platform = PLATFORMS[index];
+          platformPicker.destroy();
+          screen.render();
+          if (!platform) return;
+          (async () => {
+            const newAccount = await Account.load(randomID());
+            if (!newAccount) throw new Error(`Failed to create new Account`);
+            await newAccount.setPlatform(platform);
+            await contentCreator.addAccount(newAccount);
+          })().catch((e: unknown) => console.error(`Add Account failed: ${e instanceof Error ? e.message : String(e)}`));
+        });
+
+        platformPicker.key(['escape', 'q'], () => {
+          platformPicker.destroy();
+          screen.render();
+        });
+      }
+    }, {
+      label: "Archive: Accounts",
+      run: () => {
+        pause();
+        archiveDisplay("Accounts", () => cc.loadDeletedAccounts(), {
+          back: show,
+          onRestore: (account) => { void cc.addAccount(account); },
+        });
       }
     }, {
       label: "Delete",
-      run: async () => await contentCreator.delete()
+      run: async () => {
+        await contentCreator.delete();
+        pause();
+        opts?.onDelete ? opts.onDelete() : opts?.back?.();
+      }
     }]
   });
 }
