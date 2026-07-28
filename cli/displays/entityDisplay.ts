@@ -1,6 +1,18 @@
 import blessed from 'blessed';
 import type { Widgets } from 'blessed';
-import { screen, showList, setCurrentBack } from "../index.ts";
+import { screen, showList, setCurrentBack } from "../app.ts";
+
+// Set process-wide by the dashboard (cli/dashboard.ts) to drop just the
+// Start/Shutdown action from every display — a dashboard process is a
+// second, separate instance of every entity from the one a headless daemon
+// (cli/daemon.ts) is actually driving (see Manager's viewOnly flag), so
+// clicking "Start"/"Shutdown" here would kick off (or kill) a real, second
+// think() loop racing the daemon's. Plain data mutations (Add/Edit/Archive/
+// Delete/Connect) carry no such risk — they're ordinary DB writes, and the
+// daemon picks them up on its own periodic refresh (see
+// Manager.refreshTree()) — so those stay enabled even here.
+let blockLifecycleActions = false;
+export function setBlockLifecycleActions(v: boolean) { blockLifecycleActions = v; }
 
 export interface DisplayableEntity {
   on(evt: "change", fn: () => void): () => void;
@@ -21,8 +33,8 @@ export function startShutdownAction(entity: StartShutdownEntity): EntityAction {
   // instead of a clean message, even though the entity already reflects the
   // failure fine via its own state.
   return entity.state === "online"
-    ? { label: 'Shutdown', run: () => { entity.shutdown().catch((e: unknown) => console.error(`Shutdown failed: ${e instanceof Error ? e.message : String(e)}`)); } }
-    : { label: 'Start', run: () => { entity.start().catch((e: unknown) => console.error(`Start failed: ${e instanceof Error ? e.message : String(e)}`)); } };
+    ? { label: 'Shutdown', isLifecycleAction: true, run: () => { entity.shutdown().catch((e: unknown) => console.error(`Shutdown failed: ${e instanceof Error ? e.message : String(e)}`)); } }
+    : { label: 'Start', isLifecycleAction: true, run: () => { entity.start().catch((e: unknown) => console.error(`Start failed: ${e instanceof Error ? e.message : String(e)}`)); } };
 }
 
 export interface EntityDisplayExtension {
@@ -59,6 +71,11 @@ export interface EntityDisplayOptions<E extends DisplayableEntity> {
 export interface EntityAction {
   label: string;
   run: () => void;
+  // Marks an action as starting/stopping a real think() session (currently
+  // only startShutdownAction below) — the one category of mutation that's
+  // actually unsafe to expose from a second process, since it races the
+  // daemon's own session for the same entity rather than just writing a row.
+  isLifecycleAction?: boolean;
 }
 
 // blessed's List.setItems() always calls select(0) internally, then tries to
@@ -101,9 +118,10 @@ export function entityDisplay<E extends DisplayableEntity>(entity: E, options: E
   }
 
   function buildActions(): EntityAction[] {
+    const extra = options.extraActions?.(entity, { pause, show: () => show() }) ?? [];
     return [
       { label: 'Back', run: goBack },
-      ...(options.extraActions?.(entity, { pause, show: () => show() }) ?? [])];
+      ...(blockLifecycleActions ? extra.filter((a) => !a.isLifecycleAction) : extra)];
   }
 
   let actions = buildActions();

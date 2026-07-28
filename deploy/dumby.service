@@ -1,0 +1,30 @@
+# Sample systemd unit for running the headless AI daemon unattended.
+#
+# Install (as root, on the server):
+#   1. Edit User/WorkingDirectory/ExecStart below for your setup.
+#   2. cp deploy/dumby.service /etc/systemd/system/dumby.service
+#   3. systemctl daemon-reload
+#   4. systemctl enable --now dumby
+#
+# Then, over SSH, `dumby dashboard` (see bin/dumby.js) attaches a read-only
+# view of whatever this service is doing without starting a second copy of
+# the AI — it just polls the same MySQL database this service writes to.
+#
+# Requires `npm link` (or `npm install -g .`) to have been run in the repo
+# once, so the `dumby` binary (bin/dumby.js) is on PATH.
+
+[Unit]
+Description=Dumby AI daemon
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dumby
+WorkingDirectory=/opt/dumby
+ExecStart=/usr/bin/env dumby daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

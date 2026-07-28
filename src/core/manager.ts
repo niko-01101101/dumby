@@ -17,6 +17,15 @@ interface ManagerData extends EntityData {
 // releases, not health checks.
 const REVIEW_INTERVAL_MINUTES = 15;
 
+// Set by a read-only dashboard process (cli/dashboard.ts) before it loads the
+// Manager, so onLoad() doesn't cascade into starting every ContentCreator/
+// Editor a second time in a process that's only meant to be viewing state a
+// separate headless daemon process (cli/daemon.ts) already owns and is
+// driving. Process-wide by design — a dashboard process should never start
+// anything, full stop.
+let viewOnly = false;
+export function setViewOnly(v: boolean) { viewOnly = v; }
+
 const stateColor = {
   online: "{green-bg} {/green-bg}",
   starting: "{blue-bg} {/blue-bg}",
@@ -103,6 +112,39 @@ export class Manager extends Entity<ManagerData> {
       ?? this.editors.find((e): e is Editor => e !== undefined && e.state === "sleeping");
   }
 
+  // Re-reads this whole tree from the DB (Entity.refresh() on every row,
+  // loadX() on every list) and notifies listeners — the counterpart to a
+  // fresh onLoad(), for an already-loaded Manager picking up writes made by
+  // a *different* process. Two callers: cli/daemon.ts polls this on an
+  // interval so edits made from a separate, data-mutation-enabled dashboard
+  // process (cli/dashboard.ts — see entityDisplay.ts's blockLifecycleActions)
+  // actually take effect on the running daemon (a new Account, an edited
+  // Feedback/Release Interval, ...) without needing a restart; cli/app.ts's
+  // own dashboard-mode polling calls it too, so both sides use the same
+  // walk instead of keeping two copies in sync.
+  async refreshTree(): Promise<void> {
+    await this.refresh();
+    await this.loadContentCreators();
+    await this.loadEditors();
+
+    for (const cc of this.contentCreators) {
+      if (!cc) continue;
+      await cc.refresh();
+      await cc.loadAccounts();
+      for (const account of cc.accounts) {
+        if (!account) continue;
+        await account.refresh();
+        await account.loadVideos();
+        for (const video of account.videos) {
+          if (video) await video.refresh();
+        }
+      }
+    }
+    for (const editor of this.editors) {
+      if (editor) await editor.refresh();
+    }
+  }
+
   async onLoad() {
     // Load children before start() fans out to them — start() previously
     // ran concurrently with these loads, so its Promise.all iterated an
@@ -110,6 +152,7 @@ export class Manager extends Entity<ManagerData> {
     // without actually starting anything that existed in the DB.
     await this.loadContentCreators();
     await this.loadEditors();
+    if (viewOnly) return;
     // Deliberately NOT awaited: start() cascades into each ContentCreator's
     // full think() session (real LLM calls, up to MAX_THINK_STEPS turns,
     // potentially slow or — if it falls back to a local Ollama that isn't

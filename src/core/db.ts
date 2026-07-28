@@ -112,6 +112,18 @@ export abstract class Entity<T extends EntityData> {
     }
   }
 
+  // Re-reads this row from the DB and notifies listeners — unlike fetch(),
+  // which a fresh load() uses to populate a brand-new instance silently, this
+  // is for an already-loaded instance picking up changes made by a *different*
+  // process (e.g. a dashboard process polling state a headless daemon process
+  // is mutating — see cli/app.ts). Entity.on("change", ...) is in-process
+  // only, so a second process has no other way to find out.
+  async refresh(): Promise<boolean> {
+    const exists = await this.fetch();
+    this.notify("change");
+    return exists;
+  }
+
   async fetch() {
     try {
       const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT * FROM ${this.table} WHERE id = ? LIMIT 1`, [this.id]);

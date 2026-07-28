@@ -18,6 +18,7 @@ interface VideoData extends EntityData {
   // recentFeedback() in contentCreator.ts) as a real input into its next
   // SET PERSONALITY/TYPEOFCONTENT decision, and into the next Editor task.
   feedback?: string;
+  postedUrl?: string;
   state: VideoState;
 }
 
@@ -46,6 +47,9 @@ export class Video extends Entity<VideoData> {
   get feedback() { return this.data.feedback }
   async setFeedback(f: string) { this.data.feedback = f; await this.set("feedback", f) }
 
+  get postedUrl() { return this.data.postedUrl }
+  async setPostedUrl(url: string) { this.data.postedUrl = url; await this.set("postedUrl", url) }
+
   media: (Media | undefined)[] = [];
   async loadMedia() {
     const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT id FROM ${Media.table} WHERE videoID = ? AND deletedAt IS NULL ORDER BY position ASC`, [this.id]);
@@ -71,6 +75,7 @@ ${"ID".padEnd(5)} ${this.id}
 ${"State".padEnd(5)} ${stateColor[this.state]} ${this.state.padEnd(11)}
 ${"Prompt".padEnd(10)} ${this.prompt ?? ""}
 ${"Feedback".padEnd(10)} ${this.feedback ?? "(none yet)"}
+${"Posted".padEnd(10)} ${this.postedUrl ?? "(not posted yet)"}
 ${"UpdatedAt".padEnd(10)} ${this.updatedAt.toLocaleString().padEnd(11)}
 ${"CreatedAt".padEnd(10)} ${this.createdAt.toLocaleString().padEnd(11)}
 `

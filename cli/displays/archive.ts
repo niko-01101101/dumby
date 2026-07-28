@@ -1,5 +1,5 @@
 import blessed from 'blessed';
-import { screen, setCurrentBack } from "../index.ts";
+import { screen, setCurrentBack } from "../app.ts";
 import { refreshListItems } from "./entityDisplay.ts";
 
 export interface ArchivedEntity {

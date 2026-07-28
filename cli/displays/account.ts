@@ -45,29 +45,37 @@ export function accountDisplay(account: Account, opts?: { back?: () => void; onD
         },
       };
     },
-    extraActions: (_a, { pause, show }) => [{
-      label: "Add Video",
-      run: async () => {
-        const newVideo = await Video.load(randomID());
-        if (!newVideo) throw new Error(`Failed to create new Video`);
-        account.addVideo(newVideo);
-      }
-    }, {
-      label: "Archive: Videos",
-      run: () => {
-        pause();
-        archiveDisplay("Videos", () => account.loadDeletedVideos(), {
-          back: show,
-          onRestore: (video) => { void account.addVideo(video); },
-        });
-      }
-    }, {
-      label: "Delete",
-      run: async () => {
-        await account.delete();
-        pause();
-        opts?.onDelete ? opts.onDelete() : opts?.back?.();
-      }
-    }]
+    extraActions: (a, { pause, show }) => [
+      ...(a.platform === "youtube" ? [{
+        label: a.isConnected ? "Reconnect YouTube" : "Connect YouTube",
+        // Fire-and-forget, same as startShutdownAction — EntityAction.run
+        // isn't awaited by the caller, so a rejection has to be caught here
+        // or it becomes an unhandled rejection instead of a clean log line.
+        run: () => { account.connectYouTube().then((m) => console.log(m)).catch((e: unknown) => console.error(`Connect YouTube failed: ${e instanceof Error ? e.message : String(e)}`)); },
+      }] : []),
+      {
+        label: "Add Video",
+        run: async () => {
+          const newVideo = await Video.load(randomID());
+          if (!newVideo) throw new Error(`Failed to create new Video`);
+          account.addVideo(newVideo);
+        }
+      }, {
+        label: "Archive: Videos",
+        run: () => {
+          pause();
+          archiveDisplay("Videos", () => account.loadDeletedVideos(), {
+            back: show,
+            onRestore: (video) => { void account.addVideo(video); },
+          });
+        }
+      }, {
+        label: "Delete",
+        run: async () => {
+          await account.delete();
+          pause();
+          opts?.onDelete ? opts.onDelete() : opts?.back?.();
+        }
+      }]
   });
 }

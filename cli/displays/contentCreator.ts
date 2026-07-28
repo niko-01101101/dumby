@@ -3,7 +3,7 @@ import { Account } from "#core/account";
 import { randomID } from "#core/db";
 import { PLATFORMS, platformLabel } from "#core/platforms";
 import blessed from 'blessed';
-import { screen } from "../index.ts";
+import { screen } from "../app.ts";
 import { entityDisplay, refreshListItems, startShutdownAction } from "./entityDisplay.ts";
 import { accountDisplay } from "./account.ts";
 import { archiveDisplay } from "./archive.ts";

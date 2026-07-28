@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS videos (
   state ENUM('notStarted', 'workingOn', 'completed', 'posted') NOT NULL DEFAULT 'notStarted',
   prompt TEXT NULL,
   feedback TEXT NULL,
+  postedUrl TEXT NULL,
   FOREIGN KEY (accountID) REFERENCES accounts(id) ON DELETE CASCADE,
   createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updatedAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

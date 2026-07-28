@@ -1,7 +1,12 @@
 // Fundamentals base for todo.txt #6: the shared vocabulary + extension point
-// every Account/publishing feature builds on, without pretending to already
-// have working OAuth/upload integrations for any of the three platforms —
-// none of that exists yet, and faking it would be worse than not having it.
+// every Account/publishing feature builds on.
+
+import path from "node:path";
+import type { Account } from "./account.ts";
+import type { Video } from "./video.ts";
+import { uploadVideo } from "./youtube.ts";
+
+function mediaDir() { return process.env.MEDIA_DIR ?? "./media"; }
 
 export const PLATFORMS = ["youtube", "tiktok", "instagram_reels"] as const;
 export type Platform = typeof PLATFORMS[number];
@@ -18,17 +23,31 @@ export function platformLabel(platform: Platform): string {
   }
 }
 
-// Deliberately unimplemented: uploading real video to any of these three
-// requires that platform's OAuth app registration + user consent flow (see
-// CLAUDE.md's note on why Reddit was dropped for exactly this class of
-// problem — self-serve app registration/approval is often the actual
-// blocker, not the upload API itself). Video.state has a "posted" value with
-// nothing that sets it yet; this is the single place that will need to fill
-// in once real credentials/upload flows exist for a given platform, so
-// callers (Editor/CLI) have one function to call rather than three
-// platform-specific ones scattered around.
-export async function publishVideo(platform: Platform, _localVideoPath: string): Promise<never> {
-  throw new Error(
-    `Publishing to ${platformLabel(platform)} is not implemented yet — needs that platform's API credentials/OAuth flow wired up first.`
-  );
+// The single seam callers (ContentCreator/CLI) go through to publish,
+// rather than three platform-specific upload functions scattered around.
+// YouTube is wired up (needs the Account already connected via
+// Account.connectYouTube()); TikTok/Instagram Reels still need that
+// platform's own OAuth app registration + upload API before they can follow
+// the same pattern (see CLAUDE.md's note on why Reddit was dropped for
+// exactly this class of problem — self-serve app registration/approval is
+// often the actual blocker, not the upload API itself).
+export async function publishVideo(account: Account, video: Video): Promise<{ videoId: string; url: string }> {
+  if (account.platform !== "youtube") {
+    throw new Error(
+      `Publishing to ${platformLabel(account.platform)} is not implemented yet — needs that platform's API credentials/OAuth flow wired up first.`
+    );
+  }
+
+  const accessToken = await account.getValidAccessToken();
+  const localPath = path.join(mediaDir(), `${video.id}.mp4`);
+  const { videoId } = await uploadVideo(accessToken, localPath, {
+    title: (video.prompt ?? "Untitled").slice(0, 95),
+    description: video.prompt ?? "",
+    privacyStatus: "public",
+  });
+
+  const url = `https://youtu.be/${videoId}`;
+  await video.setPostedUrl(url);
+  await video.setState("posted");
+  return { videoId, url };
 }

@@ -14,6 +14,9 @@
   "author": "niko.01101101",
   "type": "module",
   "main": "main.ts",
+  "bin": {
+    "dumby": "./bin/dumby.js"
+  },
   "imports": {
     "#core/*": "./src/core/*.ts"
   },
