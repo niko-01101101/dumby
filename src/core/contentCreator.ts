@@ -53,7 +53,7 @@ const DEFAULT_RELEASE_INTERVAL_MINUTES = 1440;
 
 const KNOWN_COMMANDS = [
   "SET GOAL", "SET PERSONALITY", "SET TYPEOFCONTENT",
-  "CREATE ACCOUNT", "CREATE VIDEO", "POST VIDEO",
+  "CREATE VIDEO", "POST VIDEO",
   "LIST EDITORS", "LIST VIDEOS", "LIST ACCOUNTS",
   "SEARCH HACKER NEWS", "SEARCH NEWS", "HACKER NEWS TRENDS",
   "GOOGLE TRENDS", "YOUTUBE TRENDING",
@@ -154,7 +154,6 @@ GOOGLE TRENDS <region code (optional, defaults to US)> - see today's top trendin
 YOUTUBE TRENDING <region code (optional, defaults to US)> - see today's most popular YouTube videos.
 
 PRODUCTION
-CREATE ACCOUNT <platform: youtube | tiktok | instagram_reels> <description> - set up an account for your content (do this first if LIST ACCOUNTS is empty). <platform> is which service the account is on. <description> is what that account's content is centered around.
 CREATE VIDEO <task description> - hands the task to an online Editor (a shared resource your Manager provisions — you don't create your own), who builds the video under one of your Accounts and reports back. Fails if you have no Account yet, or no Editor is online. Be specific: describe the story/topic, the angle, and the tone, not just a subject.
 POST VIDEO <videoID> - publish a completed video to its Account's platform (YouTube only for now). THIS GOES LIVE PUBLICLY AND IMMEDIATELY, WITH NO REVIEW STEP — only do this once you're confident the video is finished and appropriate. Fails if the video isn't "completed" yet, or its Account isn't connected to that platform.
 LIST EDITORS - list Editors available under your Manager, with their state.
@@ -404,21 +403,6 @@ export class ContentCreator extends Entity<ContentCreatorData> {
           if (!context) return "SET TYPEOFCONTENT requires a description";
           await this.setTypeOfContent(context);
           return `Type Of Content set to: ${context}`;
-        }
-        case "CREATE ACCOUNT": {
-          const [platformWord, ...rest] = context.split(/\s+/);
-          const description = rest.join(" ").trim();
-          if (!platformWord || !isPlatform(platformWord.toLowerCase())) {
-            return `CREATE ACCOUNT requires a platform (one of: ${PLATFORMS.join(", ")}) followed by a content description`;
-          }
-          if (!description) return "CREATE ACCOUNT requires a content description after the platform";
-          const platform = platformWord.toLowerCase() as typeof PLATFORMS[number];
-          const account = await Account.load(randomID());
-          if (!account) return "Failed to create new Account";
-          await this.addAccount(account);
-          await account.setPlatform(platform);
-          await account.setContentDescription(description);
-          return `Created ${platformLabel(platform)} Account(${account.id})`;
         }
         case "CREATE VIDEO": {
           if (!context) return "CREATE VIDEO requires a task description";
