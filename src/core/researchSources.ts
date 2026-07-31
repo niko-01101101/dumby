@@ -1,19 +1,3 @@
-// Pure fetchers, no Entity coupling — mirrors mediaSources.ts.
-//
-// Reddit was dropped as a source: its unauthenticated LISTING endpoints
-// (r/<sub>.rss, r/<sub>/top.rss, anything under /r/<sub>/*.json) are
-// hard-blocked by Reddit's network policy regardless of User-Agent or OAuth
-// scope, and even its more lenient search.rss endpoint escalates from
-// rate-limited (429) to the same hard block under any real usage volume —
-// not reliable enough to depend on.
-//
-// Google Trends has no official public API; trends.google.com/trending/rss
-// is Google's own (undocumented but currently stable) RSS export, keyless.
-// Hacker News uses Algolia's public search API, fully keyless.
-// YouTube trending uses the official Data API v3 (videos.list,
-// chart=mostPopular) — a plain API key, no OAuth/user login, same shape as
-// PEXELS_API_KEY/PIXABAY_API_KEY.
-
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`[ERROR] Missing required env var: ${name}`);

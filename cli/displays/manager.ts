@@ -27,11 +27,19 @@ export function managerDisplay(manager: Manager, opts?: { back?: () => void }) {
       setValue: async (m, v) => { const n = Number(v); if (Number.isFinite(n) && n > 0) await m.setReleaseIntervalMinutes(n); },
     }],
     extend: ({ display, pause, show, registerFocusable }) => {
+      // Widths here deliberately stay clear of the right-hand column (right:
+      // 0, width 33%) - that's already fully claimed top-to-bottom by
+      // entityDisplay's own `data` box and `fieldsList` (Max Allocated
+      // Creators/Editors, Release Interval), since managerDisplay is the
+      // only display that combines `fields` with its own extend()-provided
+      // lists. Reusing that column here previously drew editorList directly
+      // on top of fieldsList - same bottom-right rect - hiding it completely
+      // and making its focus highlight invisible when Tab landed on it.
       const ccList = blessed.list({
         parent: display,
         bottom: 0,
         left: 0,
-        width: "66%-1",
+        width: "34%",
         height: "50%",
         keys: true,
         tags: true,
@@ -57,14 +65,14 @@ export function managerDisplay(manager: Manager, opts?: { back?: () => void }) {
       const editorList = blessed.list({
         parent: display,
         bottom: 0,
-        right: 0,
-        width: "33%",
+        left: "34%",
+        width: "33%-1",
         height: "50%",
         keys: true,
         tags: true,
         vi: true,
         mouse: true,
-        border: { type: 'bg' },
+        border: { type: 'line' },
         style: { selected: { bg: 'blue' } },
       });
 

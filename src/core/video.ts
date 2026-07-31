@@ -8,15 +8,7 @@ export type VideoState = "notStarted" | "workingOn" | "completed" | "posted";
 interface VideoData extends EntityData {
   accountID?: string;
   prompt?: string;
-  // Manual stand-in for real platform analytics (views/comments) — todo.txt's
-  // self-improvement item asks ContentCreators to react to "people's
-  // response," but this codebase deliberately avoids the OAuth user-login
-  // dance every platform's real metrics API would require (see CLAUDE.md's
-  // notes on Freesound/YouTube). A human logs what audience response looked
-  // like here instead (CLI field, see cli/displays/video.ts), and
-  // ContentCreator surfaces it back to itself each session (see
-  // recentFeedback() in contentCreator.ts) as a real input into its next
-  // SET PERSONALITY/TYPEOFCONTENT decision, and into the next Editor task.
+  promptProcess?: string;
   feedback?: string;
   postedUrl?: string;
   state: VideoState;
@@ -43,6 +35,14 @@ export class Video extends Entity<VideoData> {
 
   get prompt() { return this.data.prompt }
   async setPrompt(p: string) { this.data.prompt = p; await this.set("prompt", p) }
+
+  // The ContentCreator's own reasoning/research transcript up to the moment
+  // it decided to createVideo() this task — not just the final task text —
+  // so it's possible to see later *why* this prompt was chosen, not just
+  // what it was. Set once, at creation, alongside `prompt`; never rewritten
+  // on a resumed (previously-abandoned) video.
+  get promptProcess() { return this.data.promptProcess }
+  async setPromptProcess(p: string) { this.data.promptProcess = p; await this.set("promptProcess", p) }
 
   get feedback() { return this.data.feedback }
   async setFeedback(f: string) { this.data.feedback = f; await this.set("feedback", f) }
@@ -74,6 +74,7 @@ export class Video extends Entity<VideoData> {
 ${"ID".padEnd(5)} ${this.id}
 ${"State".padEnd(5)} ${stateColor[this.state]} ${this.state.padEnd(11)}
 ${"Prompt".padEnd(10)} ${this.prompt ?? ""}
+${"Process".padEnd(10)} ${this.promptProcess ? `${this.promptProcess.length} chars — see Process panel` : "(none recorded)"}
 ${"Feedback".padEnd(10)} ${this.feedback ?? "(none yet)"}
 ${"Posted".padEnd(10)} ${this.postedUrl ?? "(not posted yet)"}
 ${"UpdatedAt".padEnd(10)} ${this.updatedAt.toLocaleString().padEnd(11)}

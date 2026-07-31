@@ -1,5 +1,5 @@
 import type { RowDataPacket } from "mysql2";
-import { Entity, randomID, type EntityData } from "./db.ts";
+import { Entity, type EntityData } from "./db.ts";
 import { Account } from "./account.ts";
 import type { Editor } from "./editor.ts";
 import { Manager } from "./manager.ts";
@@ -12,15 +12,11 @@ import {
   searchNews,
 } from "./researchSources.ts";
 import { chat } from "./llm.ts";
-import { isPlatform, PLATFORMS, platformLabel, publishVideo } from "./platforms.ts";
+import { platformLabel, publishVideo } from "./platforms.ts";
 import { Reminder } from "./reminder.ts";
 
 type ContentCreatorModel = "gemma4:latest";
 type Message = { role: "system" | "user" | "assistant"; content: string };
-// "sleeping" (todo.txt #5) is the terminal state a normal session winds down
-// into — set once the think loop runs out of things to do (see start()) —
-// distinct from "offline" (never started / explicitly shut down). A
-// Reminder (see reminder.ts) is what wakes a sleeping ContentCreator back up.
 export type ContentCreatorState = "online" | "starting" | "offline" | "shuttingDown" | "stuck" | "sleeping";
 interface ContentCreatorData extends EntityData {
   managerID?: string;
@@ -31,43 +27,32 @@ interface ContentCreatorData extends EntityData {
 
 const MAX_THINK_STEPS = 8;
 const THINK_TIMEOUT_MS = 3 * 60 * 1000;
-// See llm.ts's ChatConfig.maxHistoryMessages — bounds per-call token cost as
-// the loop's history grows across MAX_THINK_STEPS turns (todo.txt "reduce
-// token spending for gemini").
 const MAX_HISTORY_MESSAGES = 16;
-// How many of this ContentCreator's own most recent videos to remind it of
-// each session (todo.txt "ContentCreators produce similar content" / self-
-// improvement) — enough to spot a repeated topic/angle without bloating the
-// system prompt with its entire back catalog.
 const RECENT_VIDEO_CONTEXT_LIMIT = 5;
-// A reply with no recognizable command is meant to signal "nothing further
-// to do" (see the system prompt), but small local models often produce one
-// confused, command-less reply without actually being done. Only treat it
-// as real completion after this many misses in a row, rather than ending
-// the whole session on the very first one.
 const MAX_CONSECUTIVE_MISSES = 3;
-// Fallback release schedule (todo #4) for a ContentCreator whose Manager
-// hasn't set its own — see Manager.releaseIntervalMinutes. 1440min = once a
-// day, the default the todo itself proposes.
 const DEFAULT_RELEASE_INTERVAL_MINUTES = 1440;
 
 const KNOWN_COMMANDS = [
-  "SET GOAL", "SET PERSONALITY", "SET TYPEOFCONTENT",
-  "CREATE VIDEO", "POST VIDEO",
-  "LIST EDITORS", "LIST VIDEOS", "LIST ACCOUNTS",
-  "SEARCH HACKER NEWS", "SEARCH NEWS", "HACKER NEWS TRENDS",
-  "GOOGLE TRENDS", "YOUTUBE TRENDING",
+  "setGoal", "setPersonality", "setTypeOfContent",
+  "createVideo", "postVideo",
+  "listEditors", "listVideos", "listAccounts",
+  "searchHackerNews", "searchNews", "hackerNewsTrends",
+  "googleTrends", "youtubeTrending",
 ].sort((a, b) => b.length - a.length);
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Matches the longest known command name as a prefix of `text`, returning
-// whatever trails it (e.g. an unneeded param the model tacked onto a
-// no-input command) as `rest`. `KNOWN_COMMANDS` is sorted longest-first so a
-// command whose name is a prefix of another's (there are none currently,
-// but this keeps it safe) can't shadow the longer match.
+// Primary parse path: commandName(argument text); — built from
+// KNOWN_COMMANDS rather than a bare `\w+\(...\)` pattern so an incidental
+// parenthetical in the model's own prose (e.g. "a video about AI (LLMs
+// specifically)") can't be mistaken for a call. `[^()]*` allows a
+// multi-line argument but can't handle a nested `(`/`)` inside it — the
+// match just truncates at the first `)`, unlike the old INVOKE/END_INVOKE
+// format's explicit delimiter.
+const CALL_PATTERN = new RegExp(`\\b(${KNOWN_COMMANDS.map(escapeRegex).join("|")})\\s*\\(([^()]*)\\)\\s*;?`, "g");
+
 function matchCommandPrefix(text: string): { name: string; rest: string } | null {
   const trimmed = text.trim();
   for (const cmd of KNOWN_COMMANDS) {
@@ -77,12 +62,9 @@ function matchCommandPrefix(text: string): { name: string; rest: string } | null
   return null;
 }
 
-// Falls back to a bare command name (e.g. "SET GOAL make funny videos") when
-// the model skips the INVOKE:/END_INVOKE wrapper entirely — small local
-// models often echo the "AVAILABLE COMMANDS" list's own syntax as plain
-// prose instead of using the format, especially on the very first turn.
-// Without this, a malformed first reply looks identical to "nothing further
-// to do" and silently ends the session before anything is ever set.
+// Fallback for a model that drops the parens/semicolon entirely and just
+// writes the command name as a plain-text prefix (e.g. "setGoal make funny
+// videos about cats").
 function parseBareCommand(content: string): { name: string; context: string } | null {
   const lines = content.trim().split("\n");
   const firstLine = lines[0] ?? "";
@@ -92,22 +74,10 @@ function parseBareCommand(content: string): { name: string; context: string } | 
   return { name: match.name, context };
 }
 
-// Sent instead of a bare "Continue." on every turn after the first — the full
-// INVOKE format only appears once, in the system prompt, and small local
-// models drift back to plain prose within a few turns if it isn't reiterated.
-// Kept deliberately (evaluated for removal per todo.txt #9): dropping it
-// reproduces the exact failure it exists to prevent — see parseBareCommand's
-// comment for the fallback that catches what still gets through. The GOAL
-// half specifically was previously invisible outside this reminder (nothing
-// exposed it), which made it look like dead weight; it's now surfaced via
-// the `goal` getter and shown in toDetailString(), so it's an actual piece
-// of session state, not just prompt filler.
 function continueReminder(extra?: string): string {
-  return `Continue. Reminder: to run a command, respond with:
-INVOKE: <COMMAND NAME>
-<input, if the command takes any>
-END_INVOKE
-Include at most one INVOKE block. Respond without one only once you have nothing further to do right now.${extra ? `\n${extra}` : ""}`;
+  return `Continue. Reminder: to run a command, call it like:
+commandName(argument, if the command takes one);
+You may include multiple commands in one response to run several in sequence. Respond without any commands only once you have nothing further to do right now.${extra ? `\n${extra}` : ""}`;
 }
 
 const contentCreatorSystemPrompt = (personality?: string, typeOfContent?: string) => `
@@ -126,39 +96,30 @@ ${typeOfContent
 NEITHER IS PERMANENT. KEEP EACH AS LONG AS IT'S WORKING — VIEWERS RESPOND TO IT, IT FEELS DISTINCT, YOUR VIDEOS ARE CONSISTENT WITH IT. CHANGE IT WHEN YOU HAVE REASON TO BELIEVE SOMETHING ELSE WOULD PERFORM BETTER, OR WHEN FEEDBACK MAKES CLEAR THE CURRENT ONE ISN'T LANDING.
 
 YOU HAVE THE ABILITY TO RUN COMMANDS TO HELP YOU IN YOUR GOAL. FOLLOW THESE RULES EXACTLY:
-- INCLUDE AT MOST ONE INVOKE BLOCK PER RESPONSE. ANYTHING AFTER THE FIRST IS IGNORED.
-- THE COMMAND NAME MUST BE SPELLED EXACTLY AS LISTED BELOW, ON ITS OWN LINE.
-- RESPOND WITHOUT AN INVOKE BLOCK ONLY ONCE YOU HAVE NOTHING FURTHER TO DO RIGHT NOW.
-
-COMMANDS THAT TAKE NO INPUT ARE FORMATTED LIKE THIS:
-INVOKE: LIST VIDEOS
-END_INVOKE
-
-COMMANDS THAT TAKE INPUT PUT IT ON THE LINES BETWEEN THE COMMAND AND END_INVOKE, FOR EXAMPLE:
-INVOKE: CREATE VIDEO
-a 30 second video about a cat learning piano
-END_INVOKE
+- YOU MAY INCLUDE MULTIPLE COMMANDS IN ONE RESPONSE TO RUN SEVERAL COMMANDS IN SEQUENCE.
+- THE COMMAND NAME MUST BE SPELLED EXACTLY AS LISTED BELOW.
+- RESPOND WITHOUT ANY COMMANDS ONLY ONCE YOU HAVE NOTHING FURTHER TO DO RIGHT NOW.
 
 AVAILABLE COMMANDS
 
 GETTING STARTED
-SET GOAL <description> - set your goal for this session. Do this first, before anything else.
-SET PERSONALITY <description> - define or change your personality: the tone, voice, and niche your content is created under.
-SET TYPEOFCONTENT <description> - define or change your type of content: what your media is centered around.
+setGoal(<description>); - set your goal for this session. Do this first, before anything else.
+setPersonality(<description>); - define or change your personality: the tone, voice, and niche your content is created under.
+setTypeOfContent(<description>); - define or change your type of content: what your media is centered around.
 
 RESEARCH — use these to find real stories and trends worth turning into content before you CREATE VIDEO
-SEARCH NEWS <query> - search recent news headlines matching a topic.
-SEARCH HACKER NEWS <query> - search Hacker News for stories matching a topic.
-HACKER NEWS TRENDS - see what's currently on the Hacker News front page.
-GOOGLE TRENDS <region code (optional, defaults to US)> - see today's top trending Google searches and the news stories driving them.
-YOUTUBE TRENDING <region code (optional, defaults to US)> - see today's most popular YouTube videos.
+searchNews(<query>); - search recent news headlines matching a topic.
+searchHackerNews(<query>); - search Hacker News for stories matching a topic.
+hackerNewsTrends(); - see what's currently on the Hacker News front page.
+googleTrends(<region code (optional, defaults to US)>); - see today's top trending Google searches and the news stories driving them.
+youtubeTrending(<region code (optional, defaults to US)>); - see today's most popular YouTube videos.
 
 PRODUCTION
-CREATE VIDEO <task description> - hands the task to an online Editor (a shared resource your Manager provisions — you don't create your own), who builds the video under one of your Accounts and reports back. Fails if you have no Account yet, or no Editor is online. Be specific: describe the story/topic, the angle, and the tone, not just a subject.
-POST VIDEO <videoID> - publish a completed video to its Account's platform (YouTube only for now). THIS GOES LIVE PUBLICLY AND IMMEDIATELY, WITH NO REVIEW STEP — only do this once you're confident the video is finished and appropriate. Fails if the video isn't "completed" yet, or its Account isn't connected to that platform.
-LIST EDITORS - list Editors available under your Manager, with their state.
-LIST VIDEOS - list videos across all of your Accounts, with their state.
-LIST ACCOUNTS - list your Accounts, with their content description.
+createVideo(<task description>); - hands the task to an online Editor (a shared resource your Manager provisions — you don't create your own), who builds the video under one of your Accounts and reports back. Fails if you have no Account yet, or no Editor is online. Be specific: describe the story/topic, the angle, and the tone, not just a subject.
+postVideo(<videoID>); - publish a completed video to its Account's platform (YouTube only for now). THIS GOES LIVE PUBLICLY AND IMMEDIATELY, WITH NO REVIEW STEP — only do this once you're confident the video is finished and appropriate. Fails if the video isn't "completed" yet, or its Account isn't connected to that platform.
+listEditors(); - list Editors available under your Manager, with their state.
+listVideos(); - list videos across all of your Accounts, with their state.
+listAccounts(); - list your Accounts, with their content description.
 `;
 
 const stateColor = {
@@ -176,10 +137,6 @@ export class ContentCreator extends Entity<ContentCreatorData> {
   private model: ContentCreatorModel = "gemma4:latest";
   history: Message[] = [];
   private _goal = "";
-  // In-memory only, deliberately not persisted: a goal is scoped to one
-  // `start()` session (reset to "" on each start()) rather than a durable
-  // property of the ContentCreator like personality/typeOfContent, so there's
-  // nothing meaningful to reload after a restart.
   get goal() { return this._goal }
 
   get personality() { return this.data.personality }
@@ -215,30 +172,24 @@ export class ContentCreator extends Entity<ContentCreatorData> {
     return Account.loadDeletedByColumn("contentCreatorID", this.id);
   }
 
-  // One call handles the whole hand-off: pick an Account, ask the Manager
-  // for whichever Editor is free (findAvailableEditor), and pass the task to
-  // it — the caller (dispatchCommand's CREATE VIDEO case) no longer has to
-  // know how an Editor gets found at all.
   async createVideo(task: string): Promise<string> {
     const account = this.accounts.find((a): a is Account => a !== undefined);
     if (!account) return "No Account available to build this video under — run CREATE ACCOUNT first";
     const editor = this.manager?.findAvailableEditor();
     if (!editor) return "No online Editor available under your Manager to build this video — ask your Manager to add and start one";
     if (editor.state === "sleeping") await editor.start();
-    // todo.txt "self improvement ... have this impact editors too" — the
-    // same recent-videos/feedback summary that steers this ContentCreator's
-    // own next move (see recentVideoContext(), used in start()) also rides
-    // along as editing context, so an Editor's tone/pacing choices react to
-    // audience response too, not just the ContentCreator's.
-    const video = await editor.createVideo(account, task, this.recentVideoContext(3));
+    const video = await editor.createVideo(account, task, this.recentVideoContext(3), this.processTranscript());
     return `Editor(${editor.id}) created Video(${video.id}) under Account(${account.id})`;
   }
 
-  // Gathers this ContentCreator's own most recent videos (prompt + state +
-  // any manually-logged audience feedback, see Video.feedback) into a text
-  // block. Used two ways: injected into the session's system prompt so it
-  // can see (and avoid repeating) its own recent topics/angles, and passed
-  // along to Editor.createVideo() so feedback also shapes editing choices.
+  // The session's reasoning trail (research commands, results, and the
+  // model's own replies) up to and not including this createVideo() call
+  // itself — recorded onto the Video so it's later possible to see why this
+  // prompt was chosen, not just what it was.
+  private processTranscript(): string {
+    return this.history.map((m) => `[${m.role}] ${m.content}`).join("\n\n");
+  }
+
   private recentVideoContext(limit = RECENT_VIDEO_CONTEXT_LIMIT): string {
     const videos = this.accounts
       .filter((a): a is Account => a !== undefined)
@@ -250,7 +201,7 @@ export class ContentCreator extends Entity<ContentCreatorData> {
     const lines = videos.map((v) =>
       `- "${v.prompt ?? "(no prompt)"}" [${v.state}]${v.feedback ? ` — feedback: ${v.feedback}` : ""}`
     );
-    return `YOUR ${videos.length} MOST RECENT VIDEOS — avoid repeating the same topic or angle, and let any feedback below inform your next SET PERSONALITY/SET TYPEOFCONTENT and CREATE VIDEO choices:\n${lines.join("\n")}`;
+    return `YOUR ${videos.length} MOST RECENT VIDEOS — avoid repeating the same topic or angle, and let any feedback below inform your next setPersonality/setTypeOfContent and createVideo choices:\n${lines.join("\n")}`;
   }
 
   get state() { return this.data.state }
@@ -266,16 +217,10 @@ export class ContentCreator extends Entity<ContentCreatorData> {
     await this.setState("shuttingDown");
     this.interrupt();
 
-    // Accounts have no online/offline lifecycle (like Video, see video.ts) —
-    // only Editors do, and those now belong to the Manager, not to us.
     await this.setState("offline");
     console.log(`ContentCreator(${this.id}) Offline`);
   }
 
-  // `wakeReason` is set when a Reminder (see reminder.ts) is what triggered
-  // this call rather than a manual Start — surfaced in the system prompt so
-  // the model knows why it's running this time (e.g. its own release
-  // schedule) instead of just seeing a blank slate.
   async start(wakeReason?: string) {
     if (this.manager && this.manager?.state !== "online") {
       console.log(`ContentCreator(${this.id}) Start Failed : Manager is not Online`);
@@ -306,11 +251,6 @@ export class ContentCreator extends Entity<ContentCreatorData> {
         message = continueReminder(this._goal ? `CURRENT GOAL: ${this._goal}` : undefined);
       }
 
-      // Ran out of things to do (or hit the step cap) without being shut
-      // down mid-session — nothing failed, there's just nothing further to
-      // act on right now. Sleep instead of sitting "online" forever, and
-      // schedule the next wake-up per the Manager's release schedule (todo
-      // #4) so the cycle continues unattended.
       if (this.state === "online") {
         await this.setState("sleeping");
         console.log(`ContentCreator(${this.id}) Sleeping`);
@@ -320,7 +260,7 @@ export class ContentCreator extends Entity<ContentCreatorData> {
       }
     } catch (e: any) {
       await this.setState("offline");
-      throw new Error("`ContentCreator(${this.id}) Start Failed", { cause: e });
+      throw new Error(`ContentCreator(${this.id}) Start Failed: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
     }
   }
 
@@ -331,18 +271,8 @@ export class ContentCreator extends Entity<ContentCreatorData> {
     try {
       this.history.push({ role: "system", content: msg });
       this.notify("change");
-      // this.history is never trimmed and is resent in full every turn — a
-      // handful of research commands (SEARCH NEWS etc.) can stack up enough
-      // text to exceed Ollama's default context window (as low as 2048 on
-      // many models), which errors out mid-session. Ollama silently
-      // truncates older messages once actual usage exceeds num_ctx rather
-      // than erroring, so raising it buys real headroom for an 8-step loop.
       const handle = chat(this.history, { ollamaModel: this.model, numCtx: 8192, maxHistoryMessages: MAX_HISTORY_MESSAGES });
       this.currentStream = handle;
-      // Nothing bounded how long a single turn could take — if the provider
-      // stalls (model hung, server unresponsive) awaiting the result below
-      // just waits forever with no error, which looks like the whole session
-      // silently paused rather than failed. Abort and surface a clear error.
       let timedOut = false;
       const timer = setTimeout(() => { timedOut = true; handle.abort(); }, THINK_TIMEOUT_MS);
       try {
@@ -352,65 +282,58 @@ export class ContentCreator extends Entity<ContentCreatorData> {
       }
       if (timedOut) throw new Error(`Chat response timed out after ${THINK_TIMEOUT_MS}ms`);
     } catch (e: any) {
-      throw new Error(`Failed to think`, { cause: e });
+      throw new Error(`Failed to think: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
     }
 
     this.history.push({ role: "assistant", content });
 
-    const invokeMatch = content.match(/INVOKE:\s*([^\n]+)\n([\s\S]*?)END_INVOKE/);
-    let parsed: { name: string; context: string } | null;
-    if (invokeMatch) {
-      const rawName = (invokeMatch[1] ?? "").trim();
-      const body = (invokeMatch[2] ?? "").trim();
-      // The model sometimes tacks an unneeded param onto the command-name
-      // line itself (e.g. "INVOKE: LIST VIDEOS <none>") instead of leaving
-      // it bare — an exact-string match on rawName would treat that as an
-      // unknown command, so resolve known-command prefixes here and fold
-      // any leftover trailing text into context, where no-input commands
-      // already ignore it harmlessly.
-      const resolved = matchCommandPrefix(rawName);
-      parsed = resolved
-        ? { name: resolved.name, context: [resolved.rest, body].filter(Boolean).join("\n").trim() }
-        : { name: rawName.toUpperCase(), context: body };
+    const invokeMatches = [...content.matchAll(CALL_PATTERN)];
+    let parsedList: { name: string; context: string }[];
+    if (invokeMatches.length) {
+      parsedList = invokeMatches.map((invokeMatch) => ({
+        name: invokeMatch[1] ?? "",
+        context: (invokeMatch[2] ?? "").trim(),
+      }));
     } else {
-      parsed = parseBareCommand(content);
+      const bare = parseBareCommand(content);
+      parsedList = bare ? [bare] : [];
     }
 
-    if (parsed) {
+    for (const parsed of parsedList) {
       const result = await this.dispatchCommand(parsed.name, parsed.context);
       this.history.push({ role: "user", content: `[${parsed.name}] ${result}` });
     }
 
     this.notify("change");
-    return parsed !== null;
+    return parsedList.length > 0;
   }
 
   private async dispatchCommand(name: string, context: string): Promise<string> {
     try {
       switch (name) {
-        case "SET GOAL": {
-          if (!context) return "SET GOAL requires a description";
+        case "setGoal": {
+          if (!context) return "setGoal(...) requires a description";
           this._goal = context;
           this.notify("change");
           return `Goal set to: ${context}`;
         }
-        case "SET PERSONALITY": {
-          if (!context) return "SET PERSONALITY requires a description";
+        case "setPersonality": {
+          if (!context) return "setPersonality(...) requires a description";
           await this.setPersonality(context);
           return `Personality set to: ${context}`;
         }
-        case "SET TYPEOFCONTENT": {
-          if (!context) return "SET TYPEOFCONTENT requires a description";
+        case "setTypeOfContent": {
+          if (!context) return "setTypeOfContent(...) requires a description";
           await this.setTypeOfContent(context);
           return `Type Of Content set to: ${context}`;
         }
-        case "CREATE VIDEO": {
-          if (!context) return "CREATE VIDEO requires a task description";
+        case "createVideo": {
+          if (!context) return "createVideo(...) requires a task description";
           return await this.createVideo(context);
         }
-        case "POST VIDEO": {
+        case "postVideo": {
           const videoID = context.trim();
-          if (!videoID) return "POST VIDEO requires a videoID";
+          if (!videoID) return "postVideo(...) requires a videoID";
           const account = this.accounts.find((a): a is Account => a !== undefined && a.videos.some((v) => v?.id === videoID));
           const video = account?.videos.find((v): v is Video => v !== undefined && v.id === videoID);
           if (!account || !video) return `No video found with id ${videoID} under any of your Accounts`;
@@ -419,33 +342,33 @@ export class ContentCreator extends Entity<ContentCreatorData> {
           const { url } = await publishVideo(account, video);
           return `Posted Video(${video.id}) to ${platformLabel(account.platform)} -> ${url}`;
         }
-        case "LIST EDITORS": {
+        case "listEditors": {
           const editors = (this.manager?.editors ?? []).filter((e): e is Editor => e !== undefined);
           return editors.length ? editors.map((e) => `${e.id} (${e.state})`).join(", ") : "No editors available under your Manager";
         }
-        case "LIST VIDEOS": {
+        case "listVideos": {
           const videos: Video[] = this.accounts
             .filter((a): a is Account => a !== undefined)
             .flatMap((a) => a.videos.filter((v): v is Video => v !== undefined));
           return videos.length ? videos.map((v) => `${v.id} (${v.state})`).join(", ") : "No videos";
         }
-        case "LIST ACCOUNTS": {
+        case "listAccounts": {
           const accounts = this.accounts.filter((a): a is Account => a !== undefined);
           return accounts.length ? accounts.map((a) => `${a.id} [${platformLabel(a.platform)}] (${a.contentDescription ?? "no description"})`).join(", ") : "No accounts";
         }
-        case "SEARCH NEWS": {
-          if (!context) return "SEARCH NEWS requires a search query";
+        case "searchNews": {
+          if (!context) return "searchNews(...) requires a search query";
           return await searchNews(context);
         }
-        case "SEARCH HACKER NEWS": {
-          if (!context) return "SEARCH HACKER NEWS requires a search query";
+        case "searchHackerNews": {
+          if (!context) return "searchHackerNews(...) requires a search query";
           return await searchHackerNews(context);
         }
-        case "HACKER NEWS TRENDS":
+        case "hackerNewsTrends":
           return await fetchHackerNewsTrends();
-        case "GOOGLE TRENDS":
+        case "googleTrends":
           return await fetchGoogleTrends(context || undefined);
-        case "YOUTUBE TRENDING":
+        case "youtubeTrending":
           return await fetchYouTubeTrending(context || undefined);
         default:
           return `Unknown command: ${name}`;

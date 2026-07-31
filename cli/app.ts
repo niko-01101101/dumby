@@ -12,6 +12,7 @@ import { editorDisplay } from './displays/editor.ts';
 import { accountDisplay } from './displays/account.ts';
 import { videoDisplay } from './displays/video.ts';
 import { startScheduler } from '#core/scheduler';
+import { EntitySubscriptionSet } from '#core/db';
 
 type AnyEntity = Manager | ContentCreator | Editor | Account | Video;
 interface Row { entity: AnyEntity; depth: number }
@@ -178,11 +179,11 @@ export async function startApp(opts: StartAppOptions): Promise<void> {
     console.error(reason instanceof Error ? reason.stack ?? reason.message : String(reason));
   });
 
-  const subscribed = new Map<AnyEntity, () => void>();
+  const subs = new EntitySubscriptionSet();
   let syncing = false;
 
-  // Re-derives the whole tree and keeps `subscribed` in sync with whatever
-  // entities currently exist in it, so additions/removals at any depth (a new
+  // Re-derives the whole tree and keeps `subs` in sync with whatever entities
+  // currently exist in it, so additions/removals at any depth (a new
   // Account, a restored Editor, a deleted Video) are picked up automatically —
   // not just changes to entities that were already known about. `syncing`
   // guards against the re-entrant call each newly-subscribed entity.on(...)
@@ -193,19 +194,7 @@ export async function startApp(opts: StartAppOptions): Promise<void> {
     syncing = true;
     try {
       rows = buildRows(manager);
-      const current = new Set(rows.map((r) => r.entity));
-
-      for (const { entity } of rows) {
-        if (!subscribed.has(entity)) {
-          subscribed.set(entity, entity.on("change", sync));
-        }
-      }
-      for (const [entity, unsubscribe] of subscribed) {
-        if (!current.has(entity)) {
-          unsubscribe();
-          subscribed.delete(entity);
-        }
-      }
+      subs.sync(rows.map((r) => r.entity), sync);
 
       const indent = (depth: number) => "  ".repeat(depth);
       refreshListItems(list, rows.map((r) => `${indent(r.depth)}${r.entity.toString()}`));

@@ -41,13 +41,17 @@ const OUTPUT_HEIGHT = 1920;
 const OUTPUT_FPS = 30;
 
 export interface CompileAudio {
-  voiceoverPath?: string;
+  // Multiple, in narration order: the model can call VOICEOVER more than
+  // once per video (e.g. narrating separate sections across turns), and
+  // every segment it recorded should end up in the final track, not just
+  // whichever one happened to be added first.
+  voiceoverPaths?: string[];
   musicPath?: string;
 }
 
 export async function compileVideo(clipPaths: string[], audio: CompileAudio, outputPath: string): Promise<void> {
   if (!clipPaths.length) throw new Error("compileVideo requires at least one clip");
-  const { voiceoverPath, musicPath } = audio;
+  const { voiceoverPaths, musicPath } = audio;
 
   await mkdir(dirname(outputPath), { recursive: true });
 
@@ -55,12 +59,12 @@ export async function compileVideo(clipPaths: string[], audio: CompileAudio, out
   for (const p of clipPaths) args.push("-i", resolve(p));
 
   let nextInput = clipPaths.length;
-  let voiceoverInput: number | undefined;
+  const voiceoverInputs: number[] = [];
   let musicInput: number | undefined;
 
-  if (voiceoverPath) {
-    args.push("-i", voiceoverPath);
-    voiceoverInput = nextInput++;
+  for (const p of voiceoverPaths ?? []) {
+    args.push("-i", resolve(p));
+    voiceoverInputs.push(nextInput++);
   }
   if (musicPath) {
     // Looped infinitely so a music track shorter than the finished video
@@ -96,16 +100,33 @@ export async function compileVideo(clipPaths: string[], audio: CompileAudio, out
   const concatInputs = clipPaths.map((_, i) => `[v${i}]`).join("");
   const filters = [...normalized, `${concatInputs}concat=n=${clipPaths.length}:v=1:a=0[vcat]`];
 
+  // Every voiceover segment is joined end-to-end into one continuous [voice]
+  // track before anything else touches it, so a video narrated across
+  // several VOICEOVER calls doesn't lose all but the first segment.
+  const hasVoice = voiceoverInputs.length > 0;
+  if (voiceoverInputs.length === 1) {
+    filters.push(`[${voiceoverInputs[0]}:a]anull[voice]`);
+  } else if (voiceoverInputs.length > 1) {
+    const voiceConcatInputs = voiceoverInputs.map((i) => `[${i}:a]`).join("");
+    filters.push(`${voiceConcatInputs}concat=n=${voiceoverInputs.length}:v=0:a=1[voice]`);
+  }
+
   const mapArgs = ["-map", "[vcat]"];
-  if (voiceoverInput !== undefined && musicInput !== undefined) {
+  if (hasVoice && musicInput !== undefined) {
+    // [voice] is a filter output, not a raw input stream — unlike an "[N:a]"
+    // input reference, a filter's own output pad can only feed one
+    // downstream filter, so it has to be explicitly split before both
+    // sidechaincompress (the ducking trigger) and amix (the actual mix) can
+    // each consume their own copy of it.
     filters.push(
+      `[voice]asplit=2[voice_duck][voice_mix]`,
       `[${musicInput}:a]volume=${MUSIC_VOLUME}[music_vol]`,
-      `[music_vol][${voiceoverInput}:a]sidechaincompress=threshold=0.05:ratio=8:attack=5:release=400[music_duck]`,
-      `[music_duck][${voiceoverInput}:a]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[aout]`,
+      `[music_vol][voice_duck]sidechaincompress=threshold=0.05:ratio=8:attack=5:release=400[music_duck]`,
+      `[music_duck][voice_mix]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[aout]`,
     );
     mapArgs.push("-map", "[aout]", "-shortest");
-  } else if (voiceoverInput !== undefined) {
-    mapArgs.push("-map", `${voiceoverInput}:a`, "-shortest");
+  } else if (hasVoice) {
+    mapArgs.push("-map", "[voice]", "-shortest");
   } else if (musicInput !== undefined) {
     filters.push(`[${musicInput}:a]volume=${MUSIC_VOLUME}[aout]`);
     mapArgs.push("-map", "[aout]", "-shortest");
@@ -113,7 +134,7 @@ export async function compileVideo(clipPaths: string[], audio: CompileAudio, out
 
   args.push("-filter_complex", filters.join(";"), ...mapArgs);
   args.push("-c:v", "libx264", "-pix_fmt", "yuv420p");
-  if (voiceoverInput !== undefined || musicInput !== undefined) args.push("-c:a", "aac");
+  if (hasVoice || musicInput !== undefined) args.push("-c:a", "aac");
   args.push(outputPath);
 
   await runFfmpeg(args);

@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS videos (
   accountID VARCHAR(36) NULL,
   state ENUM('notStarted', 'workingOn', 'completed', 'posted') NOT NULL DEFAULT 'notStarted',
   prompt TEXT NULL,
+  promptProcess MEDIUMTEXT NULL,
   feedback TEXT NULL,
   postedUrl TEXT NULL,
   FOREIGN KEY (accountID) REFERENCES accounts(id) ON DELETE CASCADE,

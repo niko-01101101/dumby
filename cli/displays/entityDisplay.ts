@@ -150,7 +150,7 @@ export function entityDisplay<E extends DisplayableEntity>(entity: E, options: E
     top: 0,
     right: 0,
     width: '33%',
-    height: fields.length ? '50%' : '50%-1 ',
+    height: fields.length ? '50%-1' : '50%-1 ',
     tags: true,
     border: { type: 'line' },
   });

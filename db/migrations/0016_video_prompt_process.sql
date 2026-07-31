@@ -1,0 +1,2 @@
+ALTER TABLE videos
+  ADD COLUMN promptProcess MEDIUMTEXT NULL AFTER prompt;

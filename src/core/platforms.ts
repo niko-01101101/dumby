@@ -1,6 +1,3 @@
-// Fundamentals base for todo.txt #6: the shared vocabulary + extension point
-// every Account/publishing feature builds on.
-
 import path from "node:path";
 import type { Account } from "./account.ts";
 import type { Video } from "./video.ts";

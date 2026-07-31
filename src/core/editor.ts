@@ -10,9 +10,6 @@ import { chat } from "./llm.ts";
 
 function mediaDir() { return process.env.MEDIA_DIR ?? "./media"; }
 
-// Piper reads voiceover text aloud verbatim, so strip any tone/stage
-// directions the model adds despite the system prompt (e.g. "(cheerfully)",
-// "[upbeat tone]", "*excited*") before it's spoken as text.
 function stripStageDirections(text: string): string {
   return text
     .replace(/\([^)]*\)/g, "")
@@ -25,38 +22,26 @@ function stripStageDirections(text: string): string {
 
 type EditorModel = "gemma4:latest";
 type Message = { role: "system" | "user" | "assistant"; content: string };
-// todo.txt "Editors not adding music" / "Improve the editor": 8 steps was
-// tight enough that a video needing several clips, a voiceover, AND music
-// routinely ran out of budget before ever reaching an explicit COMPILE (the
-// step-cap fallback in createVideo() would still compile whatever existed,
-// but music - added last in the prompt's suggested order - was often the
-// first casualty). Raised to give every command in the toolkit realistic
-// room in one session; compile() also now backstops music specifically
-// (see below) rather than relying solely on step budget.
+
 const MAX_EDIT_STEPS = 20;
 const THINK_TIMEOUT_MS = 3 * 60 * 1000;
-// See llm.ts's ChatConfig.maxHistoryMessages — bounds per-call token cost as
-// the loop's history grows across MAX_EDIT_STEPS turns (todo.txt "reduce
-// token spending for gemini").
 const MAX_HISTORY_MESSAGES = 16;
-// Short-form narration should be a few sentences at most. Nothing caps how
-// long a model's reply can get (no token limit is set on the Ollama chat
-// call below), so without this a stuck/repetitive model could hand Piper an
-// arbitrarily long script and produce an arbitrarily long voiceover track.
 const MAX_VOICEOVER_CHARS = 1000;
 
-const KNOWN_COMMANDS = ["PEXELS CLIP", "PIXABAY CLIP", "GAMEPLAY CLIP", "VOICEOVER", "MUSIC", "COMPILE"]
+const KNOWN_COMMANDS = ["pexelsClip", "pixabayClip", "gameplayClip", "voiceover", "music", "compile"]
   .sort((a, b) => b.length - a.length);
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Matches the longest known command name as a prefix of `text`, returning
-// whatever trails it (e.g. an unneeded param the model tacked onto a
-// no-input command) as `rest`. `KNOWN_COMMANDS` is sorted longest-first so a
-// command whose name is a prefix of another's (there are none currently,
-// but this keeps it safe) can't shadow the longer match.
+// Primary parse path: commandName(argument text); — built from
+// KNOWN_COMMANDS rather than a bare `\w+\(...\)` pattern so an incidental
+// parenthetical in the model's own prose can't be mistaken for a call.
+// `[^()]*` allows a multi-line argument but can't handle a nested `(`/`)`
+// inside it — the match just truncates at the first `)`.
+const CALL_PATTERN = new RegExp(`\\b(${KNOWN_COMMANDS.map(escapeRegex).join("|")})\\s*\\(([^()]*)\\)\\s*;?`, "g");
+
 function matchCommandPrefix(text: string): { name: string; rest: string } | null {
   const trimmed = text.trim();
   for (const cmd of KNOWN_COMMANDS) {
@@ -66,11 +51,12 @@ function matchCommandPrefix(text: string): { name: string; rest: string } | null
   return null;
 }
 
-// Falls back to a bare command name (e.g. "COMPILE") when the model skips
-// the INVOKE:/END_INVOKE wrapper entirely — small local models often echo
-// the "AVAILABLE COMMANDS" list's own syntax as plain prose instead of using
-// the format. Without this the attempt is silently discarded and the model
-// just gets a CONTINUE_REMINDER as if it had said nothing at all.
+// Fallback for a model that drops the parens/semicolon entirely and just
+// writes the command name as a plain-text prefix (e.g. "compile" on its own
+// line) — small local models often echo the "AVAILABLE COMMANDS" list's own
+// syntax as plain prose instead of using the format. Without this the
+// attempt is silently discarded and the model just gets a CONTINUE_REMINDER
+// as if it had said nothing at all.
 function parseBareCommand(content: string): { name: string; context: string } | null {
   const lines = content.trim().split("\n");
   const firstLine = lines[0] ?? "";
@@ -80,17 +66,15 @@ function parseBareCommand(content: string): { name: string; context: string } | 
   return { name: match.name, context };
 }
 
-// Sent instead of a bare "Continue." on every turn after the first — the full
-// INVOKE format only appears once, in the system prompt, and small local
-// models drift back to plain prose within a few turns if it isn't reiterated.
-// Unlike ContentCreator's loop, omitting an INVOKE block here does NOT end
-// the session cleanly — only COMPILE is treated as terminal (see think()
-// below) — so this reminder pushes toward finishing, not stopping.
-const CONTINUE_REMINDER = `Continue. Reminder: to run a command, respond with:
-INVOKE: <COMMAND NAME>
-<input, if the command takes any>
-END_INVOKE
-Include at most one INVOKE block. You must call COMPILE to finish — stopping without it, or running out of turns, abandons the video.`;
+// Sent instead of a bare "Continue." on every turn after the first — the
+// call syntax only appears once, in the system prompt, and small local
+// models drift back to plain prose within a few turns if it isn't
+// reiterated. Unlike ContentCreator's loop, omitting a command here does NOT
+// end the session cleanly — only compile() is treated as terminal (see
+// think() below) — so this reminder pushes toward finishing, not stopping.
+const CONTINUE_REMINDER = `Continue. Reminder: to run a command, call it like:
+commandName(argument, if the command takes one);
+You may include multiple commands in one response to run several in sequence — put compile(); last if you include it, since anything after it is ignored. You must call compile() to finish — stopping without it, or running out of turns, abandons the video.`;
 
 const editorSystemPrompt = (task: string, feedbackContext?: string, existingMediaContext?: string) => `
 YOU ARE AN EXPERIENCED VIDEO EDITOR.
@@ -100,29 +84,22 @@ ${feedbackContext ? `\n${feedbackContext}\nLET THIS INFORM YOUR EDITING CHOICES 
 ${existingMediaContext ? `\n${existingMediaContext}\n` : ""}
 
 YOU HAVE THE ABILITY TO RUN COMMANDS TO GATHER MEDIA AND ASSEMBLE THE VIDEO. FOLLOW THESE RULES EXACTLY:
-- INCLUDE AT MOST ONE INVOKE BLOCK PER RESPONSE. ANYTHING AFTER THE FIRST IS IGNORED.
-- THE COMMAND NAME MUST BE SPELLED EXACTLY AS LISTED BELOW, ON ITS OWN LINE.
-- YOU MUST CALL COMPILE TO FINISH. IT IS THE ONLY WAY YOUR WORK IS SAVED — IF YOU STOP WITHOUT IT, THE VIDEO IS ABANDONED.
+- YOU MAY INCLUDE MULTIPLE COMMANDS IN ONE RESPONSE TO RUN SEVERAL IN SEQUENCE. IF YOU INCLUDE compile(), IT MUST BE LAST — ANYTHING AFTER IT IS IGNORED.
+- THE COMMAND NAME MUST BE SPELLED EXACTLY AS LISTED BELOW.
+- YOU MUST CALL compile() TO FINISH. IT IS THE ONLY WAY YOUR WORK IS SAVED — IF YOU STOP WITHOUT IT, THE VIDEO IS ABANDONED.
 
-COMMANDS ARE FORMATTED EXACTLY LIKE THIS, WITH THE COMMAND NAME ON ITS OWN LINE:
-INVOKE: PEXELS CLIP
-a cat playing piano
-END_INVOKE
+COMMANDS ARE FORMATTED EXACTLY LIKE THIS:
+pexelsClip(a cat playing piano);
 
 AVAILABLE COMMANDS
-PEXELS CLIP <search query> - add a licensed stock video clip
-PIXABAY CLIP <search query> - add a licensed stock video clip
-GAMEPLAY CLIP <game name> - add a real Twitch gameplay clip of the named game. Use this instead of PEXELS/PIXABAY CLIP whenever the task is actually about a video game or its gameplay — stock footage services don't carry real gameplay.
-VOICEOVER <script text> - add a narrated voiceover track. THE SCRIPT TEXT IS SPOKEN ALOUD EXACTLY AS WRITTEN, WORD FOR WORD, BY A TEXT-TO-SPEECH ENGINE. DO NOT INCLUDE TONE, STYLE, OR STAGE DIRECTIONS (e.g. "(cheerfully)", "[upbeat tone]", "*excited*") OR ANY OTHER TEXT THAT ISN'T MEANT TO BE SPOKEN OUT LOUD. ONLY WRITE THE WORDS TO BE NARRATED.
-MUSIC <mood/genre query, e.g. "upbeat lofi", "tense cinematic"> - add a background music track. It plays under the whole video at low volume, automatically ducking further under any voiceover so narration stays clear. Add this to every video for production value, before COMPILE — if you skip it, COMPILE will still add a generic one automatically. At most one per video.
-COMPILE - assemble all added media into the final video. Call this once you have a handful of clips (typically 3-6 for a short-form video) and, if the task calls for narration, a voiceover. This is your last step.
+pexelsClip(<search query>); - add a licensed stock video clip
+pixabayClip(<search query>); - add a licensed stock video clip
+gameplayClip(<game name>); - add a real Twitch gameplay clip of the named game. Use this instead of pexelsClip/pixabayClip whenever the task is actually about a video game or its gameplay — stock footage services don't carry real gameplay.
+voiceover(<script text>); - add a narrated voiceover track. THE SCRIPT TEXT IS SPOKEN ALOUD EXACTLY AS WRITTEN, WORD FOR WORD, BY A TEXT-TO-SPEECH ENGINE. DO NOT INCLUDE TONE, STYLE, OR STAGE DIRECTIONS (e.g. "(cheerfully)", "[upbeat tone]", "*excited*") OR ANY OTHER TEXT THAT ISN'T MEANT TO BE SPOKEN OUT LOUD. ONLY WRITE THE WORDS TO BE NARRATED.
+music(<mood/genre query, e.g. "upbeat lofi", "tense cinematic">); - add a background music track. It plays under the whole video at low volume, automatically ducking further under any voiceover so narration stays clear. Add this to every video for production value, before compile() — if you skip it, compile() will still add a generic one automatically. At most one per video.
+compile(); - assemble all added media into the final video. Call this once you have a handful of clips (typically 3-6 for a short-form video) and, if the task calls for narration, a voiceover. This is your last step.
 `;
 
-// "sleeping" (todo.txt #5) is entered once a video finishes (or is
-// abandoned) and there's no next task queued yet — Manager.findAvailableEditor
-// wakes a sleeping Editor back up (via start()) rather than skipping it, so
-// it still counts as available to the pool, just not actively spending
-// think() calls while idle.
 export type EditorState = "online" | "starting" | "offline" | "shuttingDown" | "stuck" | "sleeping";
 interface EditorData extends EntityData {
   managerID?: string;
@@ -230,14 +207,6 @@ export class Editor extends Entity<EditorData> {
   async compile(video: Video): Promise<string> {
     await video.loadMedia();
 
-    // todo.txt "Editors not adding music": MUSIC is easy for a step-budget-
-    // pressed or forgetful model to skip entirely, since it's the one
-    // command with no direct bearing on whether COMPILE succeeds. Rather
-    // than depend on the model remembering, backstop it here — if nothing's
-    // been added by the time compile actually runs, add a generic track
-    // derived from the video's own task prompt so every finished video gets
-    // one. Best-effort: a missing/invalid FREESOUND_API_KEY or a dead-end
-    // search shouldn't block the compile a music track is secondary to.
     if (!video.media.some((m) => m?.kind === "audio" && m.source === "freesound")) {
       try {
         await this.addMusic(video, video.prompt ? `background music for ${video.prompt}` : "upbeat background music");
@@ -249,7 +218,9 @@ export class Editor extends Entity<EditorData> {
     const clips = video.media
       .filter((m): m is Media => m !== undefined && m.kind === "clip")
       .sort((a, b) => a.position - b.position);
-    const voiceover = video.media.find((m): m is Media => m !== undefined && m.kind === "audio" && (m.source === "google-tts" || m.source === "piper"));
+    const voiceovers = video.media
+      .filter((m): m is Media => m !== undefined && m.kind === "audio" && (m.source === "google-tts" || m.source === "piper"))
+      .sort((a, b) => a.position - b.position);
     const music = video.media.find((m): m is Media => m !== undefined && m.kind === "audio" && m.source === "freesound");
 
     if (!clips.length) throw new Error(`Video(${video.id}) has no clips to compile`);
@@ -258,7 +229,8 @@ export class Editor extends Entity<EditorData> {
 
     const outputPath = path.join(mediaDir(), `${video.id}.mp4`);
     const audio: CompileAudio = {};
-    if (voiceover?.localPath) audio.voiceoverPath = voiceover.localPath;
+    const voiceoverPaths = voiceovers.map((v) => v.localPath).filter((p): p is string => !!p);
+    if (voiceoverPaths.length) audio.voiceoverPaths = voiceoverPaths;
     if (music?.localPath) audio.musicPath = music.localPath;
     await compileVideo(clipPaths as string[], audio, outputPath);
 
@@ -266,12 +238,6 @@ export class Editor extends Entity<EditorData> {
     return outputPath;
   }
 
-  // If a previous createVideo() call for this exact task was abandoned mid-
-  // way (step cap hit, process crash, etc.) it left behind a Video stuck in
-  // "notStarted" or "workingOn" with real Media already downloaded/added to
-  // it. Without this, every retry minted a brand-new Video via randomID(),
-  // so that gathered media was simply never looked up again — orphaned on
-  // disk and in the DB, silently re-fetched from scratch instead.
   private findResumableVideo(account: Account, task: string): Video | undefined {
     return account.videos.find(
       (v): v is Video =>
@@ -293,7 +259,7 @@ export class Editor extends Entity<EditorData> {
     return `THIS VIDEO WAS PREVIOUSLY STARTED AND ABANDONED BEFORE IT WAS FINISHED. THE FOLLOWING MEDIA WAS ALREADY GATHERED FOR IT — DO NOT RE-FETCH ANY OF IT, BUILD ON TOP OF IT INSTEAD:\n${lines.join("\n")}`;
   }
 
-  async createVideo(account: Account, task: string, feedbackContext?: string): Promise<Video> {
+  async createVideo(account: Account, task: string, feedbackContext?: string, promptProcess?: string): Promise<Video> {
     if (this.state !== "online") throw new Error(`Editor(${this.id}) must be online to create a video`);
 
     await account.loadVideos();
@@ -310,6 +276,7 @@ export class Editor extends Entity<EditorData> {
       if (!created) throw new Error(`Failed to create new Video`);
       await account.addVideo(created);
       await created.setPrompt(task);
+      if (promptProcess) await created.setPromptProcess(promptProcess);
       video = created;
     }
     await video.setState("workingOn");
@@ -326,11 +293,6 @@ export class Editor extends Entity<EditorData> {
         message = CONTINUE_REMINDER;
       }
 
-      // The loop above only stops early on a successful COMPILE; if the model
-      // spends its whole step budget gathering clips/voiceover (or rambling
-      // without an INVOKE block, which doesn't end the loop early either) and
-      // never gets to COMPILE, the gathered media would otherwise just be
-      // discarded. Compile whatever was gathered rather than losing the work.
       if (video.state === "workingOn") {
         await video.loadMedia();
         const hasClip = video.media.some((m) => m?.kind === "clip");
@@ -339,8 +301,6 @@ export class Editor extends Entity<EditorData> {
     } finally {
       if (video.state === "workingOn") await video.setState("notStarted");
       this.activeVideo = undefined;
-      // Done with this task and nothing else queued — sleep until the next
-      // CREATE VIDEO wakes this Editor back up (see Manager.findAvailableEditor).
       if (this.state === "online") await this.setState("sleeping");
     }
 
@@ -354,14 +314,8 @@ export class Editor extends Entity<EditorData> {
     try {
       this.history.push({ role: "system", content: msg });
       this.notify("change");
-      // See ContentCreator.think() for why: unbounded history plus a small
-      // default context window is a real way to blow the budget mid-session.
       const handle = chat(this.history, { ollamaModel: this.model, numCtx: 8192, maxHistoryMessages: MAX_HISTORY_MESSAGES });
       this.currentStream = handle;
-      // Nothing bounded how long a single turn could take — if the provider
-      // stalls (model hung, server unresponsive) awaiting the result below
-      // just waits forever with no error, which looks like the whole session
-      // silently paused rather than failed. Abort and surface a clear error.
       let timedOut = false;
       const timer = setTimeout(() => { timedOut = true; handle.abort(); }, THINK_TIMEOUT_MS);
       try {
@@ -371,35 +325,31 @@ export class Editor extends Entity<EditorData> {
       }
       if (timedOut) throw new Error(`Chat response timed out after ${THINK_TIMEOUT_MS}ms`);
     } catch (e: any) {
-      throw new Error(`Failed to think`, { cause: e });
+      throw new Error(`Failed to think: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
     }
 
     this.history.push({ role: "assistant", content });
 
-    const invokeMatch = content.match(/INVOKE:\s*([^\n]+)\n([\s\S]*?)END_INVOKE/);
-    let parsed: { name: string; context: string } | null;
-    if (invokeMatch) {
-      const rawName = (invokeMatch[1] ?? "").trim();
-      const body = (invokeMatch[2] ?? "").trim();
-      // The model sometimes tacks an unneeded param onto the command-name
-      // line itself (e.g. "INVOKE: COMPILE <nothing>") instead of leaving it
-      // bare — an exact-string match on rawName would treat that as an
-      // unknown command, so resolve known-command prefixes here and fold
-      // any leftover trailing text into context, where no-input commands
-      // already ignore it harmlessly.
-      const resolved = matchCommandPrefix(rawName);
-      parsed = resolved
-        ? { name: resolved.name, context: [resolved.rest, body].filter(Boolean).join("\n").trim() }
-        : { name: rawName.toUpperCase(), context: body };
+    const invokeMatches = [...content.matchAll(CALL_PATTERN)];
+    let parsedList: { name: string; context: string }[];
+    if (invokeMatches.length) {
+      parsedList = invokeMatches.map((invokeMatch) => ({
+        name: invokeMatch[1] ?? "",
+        context: (invokeMatch[2] ?? "").trim(),
+      }));
     } else {
-      parsed = parseBareCommand(content);
+      const bare = parseBareCommand(content);
+      parsedList = bare ? [bare] : [];
     }
 
     let done = false;
-    if (parsed) {
+    for (const parsed of parsedList) {
       const { message, ok } = await this.runCommand(parsed.name, parsed.context);
       this.history.push({ role: "user", content: `[${parsed.name}] ${message}` });
-      done = parsed.name === "COMPILE" && ok;
+      if (parsed.name === "compile" && ok) {
+        done = true;
+        break;
+      }
     }
 
     this.notify("change");
@@ -412,36 +362,36 @@ export class Editor extends Entity<EditorData> {
 
     try {
       switch (name) {
-        case "PEXELS CLIP": {
+        case "pexelsClip": {
           const media = await this.addPexelsClip(video, context);
           return { message: `Added Pexels clip(${media.id}) for "${context}"`, ok: true };
         }
-        case "PIXABAY CLIP": {
+        case "pixabayClip": {
           const media = await this.addPixabayClip(video, context);
           return { message: `Added Pixabay clip(${media.id}) for "${context}"`, ok: true };
         }
-        case "GAMEPLAY CLIP": {
-          if (!context) return { message: "GAMEPLAY CLIP requires a game name", ok: false };
+        case "gameplayClip": {
+          if (!context) return { message: "gameplayClip(...) requires a game name", ok: false };
           const media = await this.addGameplayClip(video, context);
           return { message: `Added Twitch gameplay clip(${media.id}) for "${context}"`, ok: true };
         }
-        case "VOICEOVER": {
-          if (!context) return { message: "VOICEOVER requires script text", ok: false };
+        case "voiceover": {
+          if (!context) return { message: "voiceover(...) requires script text", ok: false };
           if (context.length > MAX_VOICEOVER_CHARS) {
             return {
-              message: `VOICEOVER script is ${context.length} characters, over the ${MAX_VOICEOVER_CHARS} limit for short-form narration — shorten it`,
+              message: `voiceover(...) script is ${context.length} characters, over the ${MAX_VOICEOVER_CHARS} limit for short-form narration — shorten it`,
               ok: false,
             };
           }
           const media = await this.addVoiceover(video, context);
           return { message: `Added voiceover(${media.id})`, ok: true };
         }
-        case "MUSIC": {
-          if (!context) return { message: "MUSIC requires a mood/genre query", ok: false };
+        case "music": {
+          if (!context) return { message: "music(...) requires a mood/genre query", ok: false };
           const media = await this.addMusic(video, context);
           return { message: `Added background music(${media.id}) for "${context}"`, ok: true };
         }
-        case "COMPILE": {
+        case "compile": {
           const outputPath = await this.compile(video);
           return { message: `Compiled -> ${outputPath}`, ok: true };
         }

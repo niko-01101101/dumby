@@ -2,9 +2,6 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 
-// Pure fetchers, no Entity coupling — same convention as mediaSources.ts /
-// researchSources.ts: plain `fetch`, no Google SDK dependency.
-
 const YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload";
 const OAUTH_CALLBACK_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -21,9 +18,6 @@ export function buildAuthURL(redirectUri: string, state: string): string {
     response_type: "code",
     scope: YOUTUBE_UPLOAD_SCOPE,
     access_type: "offline",
-    // Forces Google to reissue a refresh_token even if this Google account
-    // already granted consent before — without it, a reconnect after losing
-    // the stored refresh_token silently gets none back.
     prompt: "consent",
     state,
   });

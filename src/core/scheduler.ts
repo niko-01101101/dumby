@@ -1,10 +1,3 @@
-// Polls for due Reminders (todo.txt #3) and wakes whichever entity each one
-// targets — a ContentCreator via a fresh start() (see ContentCreator.start's
-// wakeReason param) or a Manager via reviewSystem() (todo #2). This is the
-// piece that actually makes "sleeping" (todo #5) and the release schedule
-// (todo #4) do something instead of just sitting there — nothing else in the
-// process checks reminders on its own.
-
 import { Reminder } from "./reminder.ts";
 import { Manager } from "./manager.ts";
 import { ContentCreator } from "./contentCreator.ts";
@@ -23,8 +16,6 @@ async function wake(reminder: Reminder): Promise<void> {
 
   const cc = await ContentCreator.load(reminder.targetID);
   if (!cc) return;
-  // Already running (woken some other way, or a manual Start beat this
-  // reminder to it) — nothing to do.
   if (cc.state === "online" || cc.state === "starting") return;
   await cc.start(reminder.message);
 }

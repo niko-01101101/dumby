@@ -29,13 +29,6 @@ export function editorDisplay(editor: Editor, opts?: { back?: () => void; onDele
       aiHistory.setLabel("Brain");
       registerFocusable(aiHistory);
 
-      // blessed's mouse tracking is a terminal-wide mode, not per-widget —
-      // once any element enables it (actionList etc. does), the terminal
-      // stops doing its own click-drag text selection anywhere on screen,
-      // mouse events go to blessed instead. There's no way to exempt just
-      // this box, so toggle terminal mouse tracking off/on for the whole
-      // screen while the Brain box is focused, so a normal drag-select-and-
-      // copy works when the user wants to copy from it.
       let mouseCaptureOff = false;
       aiHistory.key(['c'], () => {
         mouseCaptureOff = !mouseCaptureOff;

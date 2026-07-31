@@ -33,6 +33,7 @@ export interface EntityData {
 }
 export type NonstaticField<T extends EntityData> = Omit<T, "id" | "updatedAt" | "createdAt">;
 export type EntityEventType = "change" | "delete";
+interface EntityListener { evt: EntityEventType, fn: () => void }
 
 export abstract class Entity<T extends EntityData> {
   protected get table(): string { return (this.constructor as typeof Entity).table; }
@@ -41,7 +42,7 @@ export abstract class Entity<T extends EntityData> {
   protected pool: Pool;
   protected data: T = {} as T;
 
-  private _listeners: { evt: EntityEventType, fn: () => void }[] = [];
+  private _listeners: EntityListener[] = [];
   on(evt: EntityEventType, fn: () => void) {
     const nl = { evt, fn };
     this._listeners.push(nl);
@@ -86,12 +87,6 @@ export abstract class Entity<T extends EntityData> {
     }
   }
 
-  // The soft-delete counterpart to every loadX() method's `WHERE deletedAt IS
-  // NULL` filter — used to back an archive view (list what got deleted under
-  // a given parent) without every entity needing its own hand-written
-  // "loadDeletedFoo" query. `column`/`value` scope it to a parent the same
-  // way loadX() does (e.g. `ContentCreator.loadDeletedByColumn("managerID",
-  // this.id)`).
   static async loadDeletedByColumn<C extends typeof Entity<any>>(this: C, column: string, value: string): Promise<C["prototype"][]> {
     const [rows] = await getPool().query<RowDataPacket[]>(
       `SELECT id FROM ${this.table} WHERE ${column} = ? AND deletedAt IS NOT NULL`,
@@ -112,12 +107,6 @@ export abstract class Entity<T extends EntityData> {
     }
   }
 
-  // Re-reads this row from the DB and notifies listeners — unlike fetch(),
-  // which a fresh load() uses to populate a brand-new instance silently, this
-  // is for an already-loaded instance picking up changes made by a *different*
-  // process (e.g. a dashboard process polling state a headless daemon process
-  // is mutating — see cli/app.ts). Entity.on("change", ...) is in-process
-  // only, so a second process has no other way to find out.
   async refresh(): Promise<boolean> {
     const exists = await this.fetch();
     this.notify("change");
@@ -166,5 +155,39 @@ export abstract class Entity<T extends EntityData> {
     } catch (e: any) {
       throw new Error(`Failed to restore Entity(${this.table}, ${this.id})`, { cause: e });
     }
+  }
+}
+
+// Keeps a { entity -> unsubscribe } map in step with whatever set of
+// entities is currently "live", for callers (like cli/app.ts's sync()) that
+// recompute their whole entity list fresh on every pass rather than
+// incrementally adding/removing one at a time. sync() diffs the freshly
+// computed set against what's already subscribed: newly-seen entities get
+// subscribed, entities no longer present get unsubscribed — entities present
+// in both passes are left untouched, so they don't get a redundant
+// immediate re-invocation (Entity.on() calls fn() immediately on subscribe).
+// Deliberately untyped over entity kind (Entity<any>) since the one real
+// caller walks a tree mixing several different Entity subclasses at once.
+export class EntitySubscriptionSet {
+  private subscribed = new Map<Entity<any>, () => void>();
+
+  sync(entities: Iterable<Entity<any>>, onChange: () => void) {
+    const current = new Set(entities);
+    for (const entity of current) {
+      if (!this.subscribed.has(entity)) {
+        this.subscribed.set(entity, entity.on("change", onChange));
+      }
+    }
+    for (const [entity, unsubscribe] of this.subscribed) {
+      if (!current.has(entity)) {
+        unsubscribe();
+        this.subscribed.delete(entity);
+      }
+    }
+  }
+
+  clear() {
+    for (const unsubscribe of this.subscribed.values()) unsubscribe();
+    this.subscribed.clear();
   }
 }

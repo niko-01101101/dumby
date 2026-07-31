@@ -1,6 +1,6 @@
 # Dumby
 
-An AI program intended to run in the background operating social media accounts. Core entities (`Manager`, `ContentCreator`, `Editor`, `Account`, `Video`, `Media`, `Reminder`) are persisted in MySQL, with a `blessed` terminal UI for browsing and driving them. `ContentCreator` and `Editor` each run their own LLM-backed `think()` loop that dispatches `INVOKE:`-formatted commands to real methods — research, account/video creation, media assembly, and YouTube publishing are all wired up and working end to end. A `Reminder`/scheduler layer lets `ContentCreator`s and the `Manager` sleep and wake themselves back up unattended, so a session doesn't need a human (or a `setInterval`) babysitting it.
+An AI program intended to run in the background operating social media accounts. Core entities (`Manager`, `ContentCreator`, `Editor`, `Account`, `Video`, `Media`, `Reminder`) are persisted in MySQL, with a `blessed` terminal UI for browsing and driving them. `ContentCreator` and `Editor` each run their own LLM-backed `think()` loop that dispatches commands — written as `commandName(argument);` calls, one or several per reply — to real methods: research, account/video creation, media assembly, and YouTube publishing are all wired up and working end to end. A `Reminder`/scheduler layer lets `ContentCreator`s and the `Manager` sleep and wake themselves back up unattended, so a session doesn't need a human (or a `setInterval`) babysitting it.
 
 ## Status
 
@@ -10,11 +10,11 @@ The "brain" is well underway. What exists today:
 - `Manager`, `ContentCreator`, and `Editor` entities with lifecycle state (`online`, `starting`, `offline`, `shuttingDown`, `stuck`, and — new — `sleeping`, distinct from `offline`). A session winds down into `sleeping` and schedules a `Reminder` to wake itself back up, rather than just going `online` → `offline` forever.
 - `Account` (child of `ContentCreator`, holds a platform + content description) and `Video`/`Media` wired into a working media pipeline. `Editor`s are a flat pool owned directly by the `Manager` — not per-`ContentCreator` — allocated by the `Manager`'s periodic system review as needed.
 - `Manager.reviewSystem()`, woken via `Reminder` every 15 minutes: restarts anything stuck/unexpectedly offline, and provisions another `ContentCreator`/`Editor` if there's no idle capacity and room under the configured max.
-- An LLM chat layer (`src/core/llm.ts`) — Gemini by default, degrading through two Gemini tiers before falling back to local Ollama — that both `ContentCreator` and `Editor` use to drive an `INVOKE:`-command loop against their own scoped command dictionaries.
-- `ContentCreator` research commands (`SEARCH NEWS`, `SEARCH HACKER NEWS`, `HACKER NEWS TRENDS`, `GOOGLE TRENDS`, `YOUTUBE TRENDING`) for finding stories/trends worth turning into content, plus `SET GOAL`/`SET PERSONALITY`/`SET TYPEOFCONTENT`, `CREATE ACCOUNT`, `CREATE VIDEO`, `POST VIDEO`, and `LIST EDITORS`/`LIST VIDEOS`/`LIST ACCOUNTS`.
-- `Editor.createVideo()` runs its own `think()` loop that assembles a video via `PEXELS CLIP`, `PIXABAY CLIP`, `GAMEPLAY CLIP` (real Twitch gameplay clips), `VOICEOVER` (Google Cloud TTS by default, local Piper fallback), `MUSIC` (Freesound), and `COMPILE` (ffmpeg) — resuming a previously-abandoned attempt at the same task instead of re-fetching media from scratch when possible.
-- Real YouTube publishing: `Account.connectYouTube()` runs an OAuth2 loopback flow from the CLI, and `POST VIDEO` uploads directly to that channel (goes public immediately — no review gate). `tiktok`/`instagram_reels` are stubbed, not implemented.
-- A terminal UI (`cli/`) for listing and driving managers/content creators/editors/accounts/videos, including a live "Brain" view of each entity's INVOKE chat transcript — plus a headless daemon and a read-only dashboard viewer for running unattended on a server (see "Running" below).
+- An LLM chat layer (`src/core/llm.ts`) — Gemini by default, called via the official `@google/genai` SDK's Interactions API and degrading through two Gemini tiers before falling back to local Ollama — that both `ContentCreator` and `Editor` use to drive a function-call command loop (`commandName(argument);`, multiple allowed per reply) against their own scoped command dictionaries.
+- `ContentCreator` research commands (`searchNews`, `searchHackerNews`, `hackerNewsTrends`, `googleTrends`, `youtubeTrending`) for finding stories/trends worth turning into content, plus `setGoal`/`setPersonality`/`setTypeOfContent`, `createVideo`, `postVideo`, and `listEditors`/`listVideos`/`listAccounts`. `CREATE ACCOUNT` is currently only reachable from the CLI, not as an AI-invoked command.
+- `Editor.createVideo()` runs its own `think()` loop that assembles a video via `pexelsClip`, `pixabayClip`, `gameplayClip` (real Twitch gameplay clips), `voiceover` (Google Cloud TTS by default, local Piper fallback — can be called more than once per video, with segments joined in order), `music` (Freesound), and `compile` (ffmpeg) — resuming a previously-abandoned attempt at the same task instead of re-fetching media from scratch when possible.
+- Real YouTube publishing: `Account.connectYouTube()` runs an OAuth2 loopback flow from the CLI, and `postVideo` uploads directly to that channel (goes public immediately — no review gate). `tiktok`/`instagram_reels` are stubbed, not implemented.
+- A terminal UI (`cli/`) for listing and driving managers/content creators/editors/accounts/videos, including a live "Brain" view of each entity's chat transcript — plus a headless daemon and a read-only dashboard viewer for running unattended on a server (see "Running" below).
 
 What doesn't exist yet: `src/core/generate.ts` is a stub unrelated to the pipeline above.
 
@@ -23,7 +23,7 @@ What doesn't exist yet: `src/core/generate.ts` is a stub unrelated to the pipeli
 - Node.js with native TypeScript execution support (scripts are run directly via `node --env-file=.env ...`, no build step)
 - Docker (for MySQL)
 - `ffmpeg` and `piper` binaries on `PATH` (plus a Piper voice model) if you want the media pipeline (`Editor.compile`/`addVoiceover`) to actually run — Piper is required even if you're using Google Cloud TTS, since it's the fallback engine, not optional infrastructure
-- Ollama running locally with the `gemma4:latest` model pulled — required as the fallback LLM backend even if you're using Gemini, since it's used once Gemini's key is unset or its free-tier quota is hit across all fallback tiers
+- Ollama running locally with the `gemma4:latest` model pulled — required as the fallback LLM backend even if you're using Gemini, since it's used once Gemini's key is unset or its quota is hit across both fallback tiers
 
 ## Setup
 
@@ -77,7 +77,7 @@ What doesn't exist yet: `src/core/generate.ts` is a stub unrelated to the pipeli
    npm install
    ```
 
-4. Apply migrations (tracked in a `schema_migrations` table — reaches the same final schema as `db/init` incrementally, for databases that already exist):
+4. Apply migrations (tracked in a `schema_migrations` table, for databases that already exist rather than a fresh container — currently a no-op, since `db/migrations/` has no pending files and `db/init` already reflects the full schema, but run it anyway to keep `schema_migrations` in sync for whenever the next one lands):
 
    ```
    npm run migrate
@@ -119,7 +119,7 @@ npx tsc
 
 ## Notes
 
-- `db/init/*.sql` (fresh-container seed) and `db/migrations/*.sql` (applied via `npm run migrate`) are two schema sources that converge on the same final schema, reached by different paths — don't assume either is more authoritative, but a schema change needs to be added to both.
+- `db/init/*.sql` seeds a fresh container with the full current schema. `db/migrations/*.sql` (applied via `npm run migrate`, currently empty) is for evolving an already-provisioned database incrementally — add new files there for any future schema change rather than editing `db/init` alone.
 - Reddit was tried as a research source and dropped — see the top comment in `src/core/researchSources.ts` for why.
 - There's no test suite yet (`npm test` intentionally errors) and no lint/format tooling configured.
-- See `CLAUDE.md` for a fuller architecture writeup (entity caching/lifecycle details, the INVOKE command flow, sleep/Reminder/scheduler internals, media pipeline internals, YouTube OAuth/publish flow, CLI internals, import aliasing, TypeScript config notes).
+- See `CLAUDE.md` for a fuller architecture writeup (entity caching/lifecycle details, the command-dispatch flow, sleep/Reminder/scheduler internals, media pipeline internals, YouTube OAuth/publish flow, CLI internals, import aliasing, TypeScript config notes) — though it's a gitignored local file and, as of this change, is itself out of date on the LLM cascade and command syntax described below.
