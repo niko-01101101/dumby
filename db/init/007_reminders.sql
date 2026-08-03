@@ -1,5 +1,5 @@
--- Backs todo.txt #3/#4/#5: a generic wake-up mechanism for otherwise-idle
--- entities. targetType/targetID is a polymorphic reference (Manager or
+-- A generic wake-up mechanism for otherwise-idle entities. targetType/
+-- targetID is a polymorphic reference (Manager or
 -- ContentCreator today) rather than two nullable FK columns, since a
 -- reminder always points at exactly one kind of target and an ENUM-based
 -- switch is simpler than juggling two mutually-exclusive nullable FKs.

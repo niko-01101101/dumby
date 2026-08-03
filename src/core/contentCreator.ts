@@ -1,5 +1,5 @@
 import type { RowDataPacket } from "mysql2";
-import { Entity, type EntityData } from "./db.ts";
+import { Entity, randomID, type EntityData } from "./db.ts";
 import { Account } from "./account.ts";
 import type { Editor } from "./editor.ts";
 import { Manager } from "./manager.ts";
@@ -12,7 +12,7 @@ import {
   searchNews,
 } from "./researchSources.ts";
 import { chat } from "./llm.ts";
-import { platformLabel, publishVideo } from "./platforms.ts";
+import { isPlatform, PLATFORMS, platformLabel, publishVideo } from "./platforms.ts";
 import { Reminder } from "./reminder.ts";
 
 type ContentCreatorModel = "gemma4:latest";
@@ -34,7 +34,7 @@ const DEFAULT_RELEASE_INTERVAL_MINUTES = 1440;
 
 const KNOWN_COMMANDS = [
   "setGoal", "setPersonality", "setTypeOfContent",
-  "createVideo", "postVideo",
+  "createAccount", "createVideo", "postVideo",
   "listEditors", "listVideos", "listAccounts",
   "searchHackerNews", "searchNews", "hackerNewsTrends",
   "googleTrends", "youtubeTrending",
@@ -115,6 +115,7 @@ googleTrends(<region code (optional, defaults to US)>); - see today's top trendi
 youtubeTrending(<region code (optional, defaults to US)>); - see today's most popular YouTube videos.
 
 PRODUCTION
+createAccount(<platform: ${PLATFORMS.join(" | ")}> <content description>); - create an Account to publish videos under. Do this once per platform before creating videos — createVideo requires at least one Account to exist. Example: createAccount(youtube a channel breaking down obscure programming history);
 createVideo(<task description>); - hands the task to an online Editor (a shared resource your Manager provisions — you don't create your own), who builds the video under one of your Accounts and reports back. Fails if you have no Account yet, or no Editor is online. Be specific: describe the story/topic, the angle, and the tone, not just a subject.
 postVideo(<videoID>); - publish a completed video to its Account's platform (YouTube only for now). THIS GOES LIVE PUBLICLY AND IMMEDIATELY, WITH NO REVIEW STEP — only do this once you're confident the video is finished and appropriate. Fails if the video isn't "completed" yet, or its Account isn't connected to that platform.
 listEditors(); - list Editors available under your Manager, with their state.
@@ -174,7 +175,7 @@ export class ContentCreator extends Entity<ContentCreatorData> {
 
   async createVideo(task: string): Promise<string> {
     const account = this.accounts.find((a): a is Account => a !== undefined);
-    if (!account) return "No Account available to build this video under — run CREATE ACCOUNT first";
+    if (!account) return "No Account available to build this video under — run createAccount(...) first";
     const editor = this.manager?.findAvailableEditor();
     if (!editor) return "No online Editor available under your Manager to build this video — ask your Manager to add and start one";
     if (editor.state === "sleeping") await editor.start();
@@ -326,6 +327,22 @@ export class ContentCreator extends Entity<ContentCreatorData> {
           if (!context) return "setTypeOfContent(...) requires a description";
           await this.setTypeOfContent(context);
           return `Type Of Content set to: ${context}`;
+        }
+        case "createAccount": {
+          const [platformRaw, ...rest] = context.trim().split(/\s+/);
+          const description = rest.join(" ").trim();
+          if (!platformRaw || !description) {
+            return `createAccount(...) requires a platform and a content description, e.g. createAccount(youtube a channel about ...) — valid platforms: ${PLATFORMS.join(", ")}`;
+          }
+          if (!isPlatform(platformRaw)) {
+            return `createAccount(...) unknown platform "${platformRaw}" — valid platforms: ${PLATFORMS.join(", ")}`;
+          }
+          const account = await Account.load(randomID());
+          if (!account) return "Failed to create new Account";
+          await account.setPlatform(platformRaw);
+          await account.setContentDescription(description);
+          await this.addAccount(account);
+          return `Created Account(${account.id}) on ${platformLabel(platformRaw)}: ${description}`;
         }
         case "createVideo": {
           if (!context) return "createVideo(...) requires a task description";

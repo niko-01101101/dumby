@@ -11,9 +11,8 @@ interface ReminderData extends EntityData {
   fired: 0 | 1;
 }
 
-// Backs todo.txt #3 (reminder table) / #4 (release schedule) / #5 (sleep
-// states) — the generic wake-up mechanism a `sleeping` ContentCreator or an
-// idle Manager gets scheduled against. targetType/targetID is a polymorphic
+// The generic wake-up mechanism a `sleeping` ContentCreator or an idle
+// Manager gets scheduled against. targetType/targetID is a polymorphic
 // reference rather than two nullable FKs (see db/init/007_reminders.sql).
 export class Reminder extends Entity<ReminderData> {
   static table = "reminders";

@@ -120,6 +120,11 @@ export class Editor extends Entity<EditorData> {
   private currentStream: { abort: () => void } | null = null;
   private model: EditorModel = "gemma4:latest";
   private activeVideo: Video | undefined;
+  // "online" alone doesn't mean idle — it's also the state for the whole
+  // duration of an in-progress createVideo() session (see below). Exposed so
+  // Manager.findAvailableEditor() can tell a genuinely idle "online" Editor
+  // apart from one that's already mid-task, instead of double-booking it.
+  get busy() { return this.activeVideo !== undefined; }
   history: Message[] = [];
 
   manager: Manager | undefined;

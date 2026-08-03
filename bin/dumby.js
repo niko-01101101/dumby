@@ -27,13 +27,26 @@ if (!target) {
   process.exit(1);
 }
 
-const child = spawn(
-  process.execPath,
-  [`--env-file=${path.join(root, '.env')}`, path.join(root, target), ...rest],
-  { cwd: root, stdio: 'inherit' },
-);
+const dockerUp = spawn('docker', ['compose', 'up', '-d'], { cwd: root, stdio: 'inherit' });
 
-child.on('exit', (code, signal) => {
-  if (signal) process.kill(process.pid, signal);
-  else process.exit(code ?? 0);
+dockerUp.on('exit', (code) => {
+  if (code !== 0) {
+    console.error(`docker compose up -d exited with code ${code}`);
+    process.exit(code ?? 1);
+  }
+
+  setTimeout(runTarget, 1000);
 });
+
+function runTarget() {
+  const child = spawn(
+    process.execPath,
+    [`--env-file=${path.join(root, '.env')}`, path.join(root, target), ...rest],
+    { cwd: root, stdio: 'inherit' },
+  );
+
+  child.on('exit', (code, signal) => {
+    if (signal) process.kill(process.pid, signal);
+    else process.exit(code ?? 0);
+  });
+}

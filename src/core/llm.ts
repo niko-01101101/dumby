@@ -22,7 +22,10 @@ const ai = new GoogleGenAI({});
 
 // Three-tier degradation ladder: 0 = primary (geminiModel()), 1 = the
 // "gemini-flash-lite-latest" fallback specifically, 2 = Ollama only. Sticky
-// once it drops a level — see the top-of-file comment for why.
+// once it drops a level, for the rest of the process — a quota exhaustion
+// doesn't clear itself mid-run, so re-probing a tier that just 429'd on
+// every subsequent call would only waste a request confirming what's
+// already known.
 let geminiTier: 0 | 1 | 2 = 0;
 const GEMINI_FALLBACK_MODEL = "gemini-flash-lite-latest";
 
@@ -66,6 +69,7 @@ function toGeminiSteps(messages: ChatMessage[]): GeminiStep[] {
 }
 
 async function chatWithGemini(messages: ChatMessage[], model: string, signal: AbortSignal): Promise<string> {
+console.log(messages);
   let res;
   try {
     res = await ai.interactions.create(
@@ -130,7 +134,9 @@ async function chatWithOllama(messages: ChatMessage[], model: string, numCtx: nu
   }
 }
 
-// Regular chat function switches models to local based on resources spent.
+// Shared entry point both ContentCreator.think() and Editor.think() call —
+// see the geminiTier ladder above for the exact Gemini-then-Ollama fallback
+// behavior; this just wires trimming and abort support around it.
 export function chat(messages: ChatMessage[], config: ChatConfig): ChatHandle {
   const controller = new AbortController();
   const trimmed = trimHistory(messages, config.maxHistoryMessages);

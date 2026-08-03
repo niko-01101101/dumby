@@ -96,9 +96,9 @@ export async function fetchFreesoundMusic(query: string, destPath: string): Prom
   await downloadToFile(previewUrl, destPath);
 }
 
-// Twitch gameplay clips, added to the Editor's toolkit (todo.txt) alongside
-// Pexels/Pixabay stock footage for tasks that call for actual game footage
-// rather than generic B-roll — neither stock service indexes real gameplay.
+// Twitch gameplay clips, added to the Editor's toolkit alongside Pexels/
+// Pixabay stock footage for tasks that call for actual game footage rather
+// than generic B-roll — neither stock service indexes real gameplay.
 // Twitch's Helix API needs an app access token (client-credentials grant),
 // not a user OAuth login: same "keyed search, no OAuth dance" shape as
 // Pexels/Pixabay/Freesound above, just with an extra token-fetch step, since

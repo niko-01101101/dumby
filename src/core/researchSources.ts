@@ -1,3 +1,9 @@
+// Reddit was tried here and dropped: its unauthenticated listing endpoints
+// are hard-blocked by Reddit's network policy regardless of User-Agent/OAuth
+// scope, and even its more lenient search RSS endpoint escalates from
+// rate-limited to a hard network-level block under real usage — not
+// reliable enough to depend on for an unattended research command.
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`[ERROR] Missing required env var: ${name}`);

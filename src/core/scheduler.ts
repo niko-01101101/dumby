@@ -16,6 +16,8 @@ async function wake(reminder: Reminder): Promise<void> {
 
   const cc = await ContentCreator.load(reminder.targetID);
   if (!cc) return;
+  // A manual Start or some other wake path may have already beaten this
+  // reminder to it — don't kick off a second, overlapping think() session.
   if (cc.state === "online" || cc.state === "starting") return;
   await cc.start(reminder.message);
 }

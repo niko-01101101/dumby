@@ -37,8 +37,8 @@ export function videoDisplay(video: Video, opts?: { back?: () => void; onDelete?
     },
     // Manual audience-response entry — stands in for real platform analytics
     // (see the `feedback` field's comment in video.ts) and is what lets a
-    // ContentCreator's self-improvement loop (todo.txt) react to something
-    // other than a blank slate every session.
+    // ContentCreator's self-improvement loop react to something other than a
+    // blank slate every session.
     fields: [{
       label: "Feedback",
       getValue: (v) => v.feedback ?? "",

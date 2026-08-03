@@ -9,11 +9,11 @@ export interface ArchivedEntity {
   restore(): Promise<boolean>;
 }
 
-// Generic archive view for todo.txt #11 — any entity whose soft-deletes are
-// otherwise invisible (loadX() always filters deletedAt IS NULL, see
-// db.ts/CLAUDE.md) can be listed here and restored. `onRestore` is how the
-// caller gets a restored entity back into its live in-memory list/UI, mirror
-// of how removeXFromList() takes one out on delete.
+// Generic archive view — any entity whose soft-deletes are otherwise
+// invisible (loadX() always filters deletedAt IS NULL, see db.ts/CLAUDE.md)
+// can be listed here and restored. `onRestore` is how the caller gets a
+// restored entity back into its live in-memory list/UI, mirror of how
+// removeXFromList() takes one out on delete.
 export function archiveDisplay<E extends ArchivedEntity>(
   title: string,
   loadDeleted: () => Promise<E[]>,

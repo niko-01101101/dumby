@@ -33,12 +33,26 @@ function runFfmpeg(args: string[]): Promise<void> {
 const MUSIC_VOLUME = 0.25;
 
 // Clips pulled from Pexels/Pixabay rarely share resolution, aspect ratio, or
-// frame rate with each other. Every clip is normalized to this frame before
-// concatenation (letterboxed on whichever axis it doesn't fill) so the join
-// below is well-defined regardless of source. Short-form output is vertical.
+// frame rate with each other. Every clip is scaled-and-cropped to this frame
+// before concatenation (see the normalized/filters comment below for why
+// cover-crop rather than letterbox) so the join is well-defined regardless
+// of source. Short-form output is vertical.
 const OUTPUT_WIDTH = 1080;
 const OUTPUT_HEIGHT = 1920;
 const OUTPUT_FPS = 30;
+
+// A voiceover (one segment up to MAX_VOICEOVER_CHARS, and multiple segments
+// can be concatenated into one track — see CompileAudio.voiceoverPaths)
+// routinely outlasts the handful of short stock clips backing it. -shortest
+// below stops the output at whichever mapped stream ends first, which used
+// to mean it cut narration off mid-sentence the moment the clips ran out
+// instead of the other way around. Padding the concatenated video with
+// frozen last-frame time up to this cap (well over any realistic narration
+// length) keeps video from ever being the shorter stream when a voiceover is
+// present, without needing to know the voiceover's actual duration up
+// front — -shortest still trims the pad down to whatever the real audio
+// length turns out to be.
+const MAX_VIDEO_PAD_SECONDS = 3600;
 
 export interface CompileAudio {
   // Multiple, in narration order: the model can call VOICEOVER more than
@@ -88,11 +102,10 @@ export async function compileVideo(clipPaths: string[], audio: CompileAudio, out
   // Stock footage is frequently landscape even when the search query asks
   // for portrait clips, so scaling to *fit* (force_original_aspect_ratio=
   // decrease) followed by a black pad left most of a landscape clip's frame
-  // as dead letterbox space — the wrong ratio todo.txt flagged. Scaling to
-  // *cover* (increase) and then center-cropping to the output frame fills
-  // the whole 1080x1920 canvas instead, at the cost of cropping the edges of
-  // non-vertical source footage, which is the standard trade-off short-form
-  // video makes.
+  // as dead letterbox space. Scaling to *cover* (increase) and then
+  // center-cropping to the output frame fills the whole 1080x1920 canvas
+  // instead, at the cost of cropping the edges of non-vertical source
+  // footage, which is the standard trade-off short-form video makes.
   const normalized = clipPaths.map((_, i) =>
     `[${i}:v]scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:force_original_aspect_ratio=increase,` +
     `crop=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT},setsar=1,fps=${OUTPUT_FPS}[v${i}]`
@@ -111,7 +124,17 @@ export async function compileVideo(clipPaths: string[], audio: CompileAudio, out
     filters.push(`${voiceConcatInputs}concat=n=${voiceoverInputs.length}:v=0:a=1[voice]`);
   }
 
-  const mapArgs = ["-map", "[vcat]"];
+  // See MAX_VIDEO_PAD_SECONDS: only needed when there's a voiceover that
+  // could outlast the clips — without one, -shortest bounding video against
+  // an infinitely-looped music track (or no audio at all) is already correct
+  // and shouldn't be stretched.
+  let videoOut = "vcat";
+  if (hasVoice) {
+    filters.push(`[vcat]tpad=stop_mode=clone:stop_duration=${MAX_VIDEO_PAD_SECONDS}[vpad]`);
+    videoOut = "vpad";
+  }
+
+  const mapArgs = ["-map", `[${videoOut}]`];
   if (hasVoice && musicInput !== undefined) {
     // [voice] is a filter output, not a raw input stream — unlike an "[N:a]"
     // input reference, a filter's own output pad can only feed one

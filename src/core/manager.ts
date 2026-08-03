@@ -12,9 +12,9 @@ interface ManagerData extends EntityData {
   releaseIntervalMinutes: number;
 }
 
-// How often reviewSystem() (todo.txt #2) re-runs itself via a self-scheduled
-// Reminder — independent of releaseIntervalMinutes, which paces content
-// releases, not health checks.
+// How often reviewSystem() re-runs itself via a self-scheduled Reminder —
+// independent of releaseIntervalMinutes, which paces content releases, not
+// health checks.
 const REVIEW_INTERVAL_MINUTES = 15;
 
 // Set by a read-only dashboard process (cli/dashboard.ts) before it loads the
@@ -46,9 +46,9 @@ export class Manager extends Entity<ManagerData> {
   get maxAllocatedEditors() { return this.data.maxAllocatedEditors }
   async setMaxAllocatedEditors(a: number) { await this.set("maxAllocatedEditors", a) }
 
-  // todo.txt #4: how often a ContentCreator under this Manager re-wakes
-  // itself to look for new content, once its current session winds down and
-  // it goes to sleep (see ContentCreator.start()).
+  // How often a ContentCreator under this Manager re-wakes itself to look
+  // for new content, once its current session winds down and it goes to
+  // sleep (see ContentCreator.start()).
   get releaseIntervalMinutes() { return this.data.releaseIntervalMinutes }
   async setReleaseIntervalMinutes(m: number) { await this.set("releaseIntervalMinutes", m) }
 
@@ -105,10 +105,14 @@ export class Manager extends Entity<ManagerData> {
   // used by ContentCreator's CREATE VIDEO so it can hand off the whole
   // find-an-editor-and-assign-it step as one call instead of the caller
   // reaching into `manager.editors` itself. Prefers an Editor that's already
-  // online; falls back to a sleeping one (see EditorState) — the caller is
-  // responsible for waking it (editor.start()) before handing it work.
+  // online (and not already mid-task, see Editor.busy — "online" alone
+  // covers both a freshly-started idle Editor and one still working a
+  // previous createVideo() call, and handing work to the latter would
+  // clobber its in-progress activeVideo/history); falls back to a sleeping
+  // one (see EditorState) — the caller is responsible for waking it
+  // (editor.start()) before handing it work.
   findAvailableEditor(): Editor | undefined {
-    return this.editors.find((e): e is Editor => e !== undefined && e.state === "online")
+    return this.editors.find((e): e is Editor => e !== undefined && e.state === "online" && !e.busy)
       ?? this.editors.find((e): e is Editor => e !== undefined && e.state === "sleeping");
   }
 
@@ -169,9 +173,9 @@ export class Manager extends Entity<ManagerData> {
     }
   }
 
-  // todo.txt #2: the Manager's own periodic check-and-debug pass, woken via
-  // Reminder (todo #3) rather than a setInterval, so it survives process
-  // restarts the same way ContentCreator's release schedule does. Two jobs:
+  // The Manager's own periodic check-and-debug pass, woken via Reminder
+  // rather than a setInterval, so it survives process restarts the same way
+  // ContentCreator's release schedule does. Two jobs:
   //  1. Debug — anything "stuck" or unexpectedly "offline" gets restarted.
   //  2. Allocate — if there's no idle capacity anywhere and there's still
   //     room under maxAllocated*, add one more (see per-entity comments
